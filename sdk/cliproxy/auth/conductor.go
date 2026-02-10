@@ -607,7 +607,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				result.RetryAfter = ra
 			}
 			m.MarkResult(execCtx, result)
-			if isRequestInvalidError(errExec) {
+			if shouldAbortOnRequestInvalidError(provider, errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			lastErr = errExec
@@ -663,7 +663,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				result.RetryAfter = ra
 			}
 			m.MarkResult(execCtx, result)
-			if isRequestInvalidError(errExec) {
+			if shouldAbortOnRequestInvalidError(provider, errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
 			lastErr = errExec
@@ -717,7 +717,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(execCtx, result)
-			if isRequestInvalidError(errStream) {
+			if shouldAbortOnRequestInvalidError(provider, errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -1440,6 +1440,19 @@ func statusCodeFromResult(err *Error) int {
 		return 0
 	}
 	return err.StatusCode()
+}
+
+func shouldAbortOnRequestInvalidError(provider string, err error) bool {
+	if !isRequestInvalidError(err) {
+		return false
+	}
+	// Claude (especially Claude Code OAuth tokens) can return 400 invalid_request_error
+	// for auth-scoped issues (e.g. account disabled / token invalid). In multi-auth
+	// setups switching credentials can still succeed, so don't abort traversal.
+	if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return false
+	}
+	return true
 }
 
 // isRequestInvalidError returns true if the error represents a client request
