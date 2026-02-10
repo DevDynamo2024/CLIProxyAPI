@@ -37,6 +37,19 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Per-client API key policies (restrictions and daily limits).
+# - excluded-models supports '*' wildcard matching and is case-insensitive.
+# - allow-claude-opus-4-6: when false, requests for claude-opus-4-6* are downgraded to claude-opus-4-5-20251101*.
+# - daily-limits: request counts are tracked per day in China Standard Time (UTC+8).
+# - Storage: daily counters are persisted in SQLite at APIKEY_POLICY_SQLITE_PATH (or a default path under the writable directory).
+api-key-policies:
+  - api-key: "your-api-key-1"
+    excluded-models:
+      - "claude-haiku-4-5-20251001"
+    allow-claude-opus-4-6: true
+    daily-limits:
+      claude-opus-4-6: 10
+
 # Enable debug logging
 debug: false
 

@@ -27,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -165,6 +166,8 @@ type Server struct {
 
 	localPassword string
 
+	dailyLimiter *policy.SQLiteDailyLimiter
+
 	keepAliveEnabled   bool
 	keepAliveTimeout   time.Duration
 	keepAliveOnTimeout func()
@@ -246,6 +249,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		envManagementSecret: envManagementSecret,
 		wsRoutes:            make(map[string]struct{}),
 	}
+	s.dailyLimiter = s.initDailyLimiter(configFilePath)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -304,6 +308,26 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	return s
 }
 
+func (s *Server) initDailyLimiter(configFilePath string) *policy.SQLiteDailyLimiter {
+	// Always initialize limiter so management can enable limits without restart.
+	// If initialization fails, policy middleware will surface the error when limits are configured.
+	path := strings.TrimSpace(os.Getenv("APIKEY_POLICY_SQLITE_PATH"))
+	if path == "" {
+		base := util.WritablePath()
+		if base == "" {
+			base = filepath.Dir(configFilePath)
+		}
+		path = filepath.Join(base, "api_key_policy_limits.sqlite")
+	}
+	limiter, err := policy.NewSQLiteDailyLimiter(path)
+	if err != nil {
+		log.WithError(err).Warnf("failed to initialize api key policy daily limiter (sqlite): %s", path)
+		return nil
+	}
+	log.Infof("api key policy daily limiter enabled (sqlite): %s", path)
+	return limiter
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
@@ -317,6 +341,7 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -330,6 +355,7 @@ func (s *Server) setupRoutes() {
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -522,6 +548,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+
+		mgmt.GET("/api-key-policies", s.mgmt.GetAPIKeyPolicies)
+		mgmt.PUT("/api-key-policies", s.mgmt.PutAPIKeyPolicies)
+		mgmt.PATCH("/api-key-policies", s.mgmt.PatchAPIKeyPolicies)
+		mgmt.DELETE("/api-key-policies", s.mgmt.DeleteAPIKeyPolicies)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -753,16 +784,93 @@ func (s *Server) watchKeepAlive() {
 func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, claudeHandler *claude.ClaudeCodeAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		userAgent := c.GetHeader("User-Agent")
+		apiKey := strings.TrimSpace(c.GetString("apiKey"))
 
 		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
-			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
-			claudeHandler.ClaudeModels(c)
-		} else {
-			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
-			openaiHandler.OpenAIModels(c)
+			models := claudeHandler.Models()
+			models = s.filterModelsForAPIKey(models, apiKey)
+
+			firstID := ""
+			lastID := ""
+			if len(models) > 0 {
+				if id, ok := models[0]["id"].(string); ok {
+					firstID = id
+				}
+				if id, ok := models[len(models)-1]["id"].(string); ok {
+					lastID = id
+				}
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"data":     models,
+				"has_more": false,
+				"first_id": firstID,
+				"last_id":  lastID,
+			})
+			return
 		}
+
+		allModels := openaiHandler.Models()
+		allModels = s.filterModelsForAPIKey(allModels, apiKey)
+
+		filteredModels := make([]map[string]any, len(allModels))
+		for i, model := range allModels {
+			filteredModel := map[string]any{
+				"id":     model["id"],
+				"object": model["object"],
+			}
+			if created, exists := model["created"]; exists {
+				filteredModel["created"] = created
+			}
+			if ownedBy, exists := model["owned_by"]; exists {
+				filteredModel["owned_by"] = ownedBy
+			}
+			filteredModels[i] = filteredModel
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filteredModels,
+		})
 	}
+}
+
+func (s *Server) filterModelsForAPIKey(models []map[string]any, apiKey string) []map[string]any {
+	if s == nil || s.cfg == nil || len(models) == 0 {
+		return models
+	}
+	p := s.cfg.FindAPIKeyPolicy(apiKey)
+	if p == nil {
+		return models
+	}
+
+	out := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		idValue, _ := model["id"].(string)
+		idKey := strings.ToLower(strings.TrimSpace(idValue))
+		if idKey == "" {
+			continue
+		}
+		if !p.AllowsClaudeOpus46() && strings.HasPrefix(idKey, "claude-opus-4-6") {
+			continue
+		}
+		denied := false
+		for _, pattern := range p.ExcludedModels {
+			if policy.MatchWildcard(pattern, idKey) {
+				denied = true
+				break
+			}
+		}
+		if denied {
+			continue
+		}
+		out = append(out, model)
+	}
+	return out
 }
 
 // Start begins listening for and serving HTTP or HTTPS requests.
@@ -812,6 +920,12 @@ func (s *Server) Stop(ctx context.Context) error {
 		select {
 		case s.keepAliveStop <- struct{}{}:
 		default:
+		}
+	}
+
+	if s.dailyLimiter != nil {
+		if err := s.dailyLimiter.Close(); err != nil {
+			log.WithError(err).Warn("failed to close api key policy daily limiter")
 		}
 	}
 

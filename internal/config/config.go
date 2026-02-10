@@ -111,6 +111,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// APIKeyPolicies defines per-client API key restrictions and quotas.
+	// These policies apply to incoming requests authenticated by client API keys (top-level api-keys / access providers).
+	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
@@ -612,6 +616,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+
+	// Normalize API key policies (model restrictions and quotas).
+	cfg.SanitizeAPIKeyPolicies()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
