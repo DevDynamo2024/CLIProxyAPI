@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -85,3 +87,60 @@ func TestManagerExecute_InvalidRequestError_ClaudeContinuesTraversal(t *testing.
 	}
 }
 
+func TestManagerExecute_InvalidRequestError_ClaudeCoolsDownAuth(t *testing.T) {
+	t.Parallel()
+
+	prefix := strings.ReplaceAll(strings.ToLower(t.Name()), "/", "-")
+	idA := prefix + "-a"
+	idB := prefix + "-b"
+	idC := prefix + "-c"
+	modelID := "claude-sonnet-4"
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	executor := &failoverTestExecutor{
+		provider: "claude",
+		failByID: map[string]error{
+			idA: invalidRequestStatusErr{msg: `{"error":{"type":"invalid_request_error","message":"account disabled"}}`},
+			idB: invalidRequestStatusErr{msg: `{"error":{"type":"invalid_request_error","message":"account disabled"}}`},
+		},
+		response: cliproxyexecutor.Response{Payload: []byte("ok")},
+	}
+	manager.RegisterExecutor(executor)
+
+	_, _ = manager.Register(context.Background(), &Auth{ID: idA, Provider: "claude"})
+	_, _ = manager.Register(context.Background(), &Auth{ID: idB, Provider: "claude"})
+	_, _ = manager.Register(context.Background(), &Auth{ID: idC, Provider: "claude"})
+
+	registry.GetGlobalRegistry().RegisterClient(idA, "claude", []*registry.ModelInfo{{ID: modelID}})
+	registry.GetGlobalRegistry().RegisterClient(idB, "claude", []*registry.ModelInfo{{ID: modelID}})
+	registry.GetGlobalRegistry().RegisterClient(idC, "claude", []*registry.ModelInfo{{ID: modelID}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(idA)
+		registry.GetGlobalRegistry().UnregisterClient(idB)
+		registry.GetGlobalRegistry().UnregisterClient(idC)
+	})
+
+	req := cliproxyexecutor.Request{Model: modelID}
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("Execute() payload = %q, want %q", string(resp.Payload), "ok")
+	}
+	if len(executor.execCalls) != 3 {
+		t.Fatalf("Execute() executor calls = %v, want 3 calls", executor.execCalls)
+	}
+
+	executor.execCalls = nil
+	resp, err = manager.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("Execute() payload = %q, want %q", string(resp.Payload), "ok")
+	}
+	if len(executor.execCalls) != 1 || executor.execCalls[0] != idC {
+		t.Fatalf("Execute() executor calls = %v, want [%s]", executor.execCalls, idC)
+	}
+}

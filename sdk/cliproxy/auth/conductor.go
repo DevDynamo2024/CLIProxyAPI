@@ -1190,6 +1190,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
+				case 400:
+					if isClaudeProvider(result.Provider) {
+						if cooldown := claudeInvalidRequestCooldown(result.Error); cooldown > 0 {
+							next := now.Add(cooldown)
+							state.NextRetryAfter = next
+							suspendReason = "invalid_request_error"
+							shouldSuspendModel = true
+							break
+						}
+					}
+					state.NextRetryAfter = time.Time{}
 				case 401:
 					next := now.Add(30 * time.Minute)
 					state.NextRetryAfter = next
@@ -1470,6 +1481,64 @@ func isRequestInvalidError(err error) bool {
 	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
+type providerErrorEnvelope struct {
+	Error struct {
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+func extractProviderErrorMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var envelope providerErrorEnvelope
+	if err := json.Unmarshal([]byte(raw), &envelope); err == nil {
+		if msg := strings.TrimSpace(envelope.Error.Message); msg != "" {
+			return msg
+		}
+	}
+	return raw
+}
+
+func isClaudeProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "claude")
+}
+
+func claudeInvalidRequestCooldown(err *Error) time.Duration {
+	if err == nil || !isRequestInvalidError(err) {
+		return 0
+	}
+	raw := strings.TrimSpace(err.Message)
+	if raw == "" {
+		raw = strings.TrimSpace(err.Error())
+	}
+	if raw == "" {
+		return 0
+	}
+	parsed := strings.ToLower(extractProviderErrorMessage(raw))
+	if parsed == "" {
+		parsed = strings.ToLower(raw)
+	}
+
+	if strings.Contains(parsed, "account") {
+		if strings.Contains(parsed, "disabled") || strings.Contains(parsed, "suspended") || strings.Contains(parsed, "banned") || strings.Contains(parsed, "blocked") {
+			return 24 * time.Hour
+		}
+		return 30 * time.Minute
+	}
+
+	if strings.Contains(parsed, "token") ||
+		strings.Contains(parsed, "oauth") ||
+		strings.Contains(parsed, "credential") ||
+		strings.Contains(parsed, "session") ||
+		strings.Contains(parsed, "login") {
+		return 30 * time.Minute
+	}
+
+	return 0
+}
+
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
 		return
@@ -1485,6 +1554,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
+	case 400:
+		if isClaudeProvider(auth.Provider) {
+			if cooldown := claudeInvalidRequestCooldown(resultErr); cooldown > 0 {
+				auth.NextRetryAfter = now.Add(cooldown)
+			}
+		}
 	case 401:
 		auth.StatusMessage = "unauthorized"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
