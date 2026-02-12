@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -254,6 +255,10 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider == "anthropic" || provider == "claude" {
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, auth)
+		return token, errToken
+	}
 	if provider == "gemini-cli" {
 		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
 		return token, errToken
@@ -264,6 +269,83 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 
 	return tokenValueForAuth(auth), nil
+}
+
+func claudeTokenNeedsRefresh(auth *coreauth.Auth) bool {
+	// Refresh a bit early to avoid requests racing token expiry.
+	const skew = 30 * time.Second
+
+	if auth == nil {
+		return true
+	}
+	exp, ok := auth.ExpirationTime()
+	if !ok || exp.IsZero() {
+		return true
+	}
+	return !exp.After(time.Now().Add(skew))
+}
+
+func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+
+	metadata := auth.Metadata
+	current := strings.TrimSpace(tokenValueFromMetadata(metadata))
+	refreshToken := strings.TrimSpace(stringValue(metadata, "refresh_token"))
+	if refreshToken == "" {
+		return current, nil
+	}
+	if current != "" && !claudeTokenNeedsRefresh(auth) {
+		return current, nil
+	}
+
+	if h == nil || h.cfg == nil {
+		return current, nil
+	}
+
+	// Respect credential-scoped proxy_url when present.
+	effectiveCfg := h.cfg
+	if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+		cfgCopy := *effectiveCfg
+		cfgCopy.ProxyURL = proxyURL
+		effectiveCfg = &cfgCopy
+	}
+
+	svc := claudeauth.NewClaudeAuth(effectiveCfg)
+	td, errToken := svc.RefreshTokens(ctx, refreshToken)
+	if errToken != nil {
+		return "", errToken
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+
+	now := time.Now()
+	auth.Metadata["access_token"] = strings.TrimSpace(td.AccessToken)
+	if strings.TrimSpace(td.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(td.RefreshToken)
+	}
+	if strings.TrimSpace(td.Email) != "" {
+		auth.Metadata["email"] = strings.TrimSpace(td.Email)
+	}
+	if strings.TrimSpace(td.Expire) != "" {
+		auth.Metadata["expired"] = strings.TrimSpace(td.Expire)
+	}
+	auth.Metadata["type"] = "claude"
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+
+	if h.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = h.authManager.Update(ctx, auth)
+	}
+
+	return strings.TrimSpace(td.AccessToken), nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
