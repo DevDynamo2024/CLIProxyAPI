@@ -29,9 +29,13 @@ static/*
 auths/*
 !auths/.gitkeep
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Documentation
 docs/*
-AGENTS.md
 CLAUDE.md
 GEMINI.md
 
