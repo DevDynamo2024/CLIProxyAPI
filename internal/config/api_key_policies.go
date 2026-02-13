@@ -21,6 +21,10 @@ type APIKeyPolicy struct {
 	// DailyLimits defines per-model daily request limits for this API key.
 	// Key is a model ID (case-insensitive). Values <= 0 are treated as disabled and dropped.
 	DailyLimits map[string]int `yaml:"daily-limits,omitempty" json:"daily-limits,omitempty"`
+
+	// DailyBudgetUSD defines the maximum daily spend (USD) allowed for this API key.
+	// Values <= 0 are treated as disabled.
+	DailyBudgetUSD float64 `yaml:"daily-budget-usd,omitempty" json:"daily-budget-usd,omitempty"`
 }
 
 func (p *APIKeyPolicy) AllowsClaudeOpus46() bool {
@@ -86,6 +90,10 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 			} else {
 				entry.DailyLimits = nil
 			}
+		}
+
+		if entry.DailyBudgetUSD <= 0 {
+			entry.DailyBudgetUSD = 0
 		}
 
 		key := entry.APIKey

@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
@@ -37,6 +38,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -167,6 +169,7 @@ type Server struct {
 	localPassword string
 
 	dailyLimiter *policy.SQLiteDailyLimiter
+	billingStore *billing.SQLiteStore
 
 	keepAliveEnabled   bool
 	keepAliveTimeout   time.Duration
@@ -250,6 +253,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:            make(map[string]struct{}),
 	}
 	s.dailyLimiter = s.initDailyLimiter(configFilePath)
+	s.billingStore = s.initBillingStore(configFilePath)
+	if s.billingStore != nil {
+		coreusage.RegisterPlugin(billing.NewUsagePersistPlugin(s.billingStore))
+	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
@@ -261,6 +268,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	if s.billingStore != nil {
+		s.mgmt.SetBillingStore(s.billingStore)
+	}
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -311,14 +321,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 func (s *Server) initDailyLimiter(configFilePath string) *policy.SQLiteDailyLimiter {
 	// Always initialize limiter so management can enable limits without restart.
 	// If initialization fails, policy middleware will surface the error when limits are configured.
-	path := strings.TrimSpace(os.Getenv("APIKEY_POLICY_SQLITE_PATH"))
-	if path == "" {
-		base := util.WritablePath()
-		if base == "" {
-			base = filepath.Dir(configFilePath)
-		}
-		path = filepath.Join(base, "api_key_policy_limits.sqlite")
-	}
+	path := resolvePolicySQLitePath(configFilePath)
 	limiter, err := policy.NewSQLiteDailyLimiter(path)
 	if err != nil {
 		log.WithError(err).Warnf("failed to initialize api key policy daily limiter (sqlite): %s", path)
@@ -326,6 +329,29 @@ func (s *Server) initDailyLimiter(configFilePath string) *policy.SQLiteDailyLimi
 	}
 	log.Infof("api key policy daily limiter enabled (sqlite): %s", path)
 	return limiter
+}
+
+func (s *Server) initBillingStore(configFilePath string) *billing.SQLiteStore {
+	path := resolvePolicySQLitePath(configFilePath)
+	store, err := billing.NewSQLiteStore(path)
+	if err != nil {
+		log.WithError(err).Warnf("failed to initialize billing store (sqlite): %s", path)
+		return nil
+	}
+	log.Infof("billing store enabled (sqlite): %s", path)
+	return store
+}
+
+func resolvePolicySQLitePath(configFilePath string) string {
+	path := strings.TrimSpace(os.Getenv("APIKEY_POLICY_SQLITE_PATH"))
+	if path != "" {
+		return path
+	}
+	base := util.WritablePath()
+	if base == "" {
+		base = filepath.Dir(configFilePath)
+	}
+	return filepath.Join(base, "api_key_policy_limits.sqlite")
 }
 
 // setupRoutes configures the API routes for the server.
@@ -341,7 +367,7 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
-	v1.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter))
+	v1.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter, s.billingStore))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -355,7 +381,7 @@ func (s *Server) setupRoutes() {
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
-	v1beta.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter))
+	v1beta.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter, s.billingStore))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -553,6 +579,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-key-policies", s.mgmt.PutAPIKeyPolicies)
 		mgmt.PATCH("/api-key-policies", s.mgmt.PatchAPIKeyPolicies)
 		mgmt.DELETE("/api-key-policies", s.mgmt.DeleteAPIKeyPolicies)
+
+		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
+		mgmt.PUT("/model-prices", s.mgmt.PutModelPrice)
+		mgmt.DELETE("/model-prices", s.mgmt.DeleteModelPrice)
+
+		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyDailyUsage)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
@@ -929,6 +961,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.dailyLimiter != nil {
 		if err := s.dailyLimiter.Close(); err != nil {
 			log.WithError(err).Warn("failed to close api key policy daily limiter")
+		}
+	}
+	if s.billingStore != nil {
+		if err := s.billingStore.Close(); err != nil {
+			log.WithError(err).Warn("failed to close billing store")
 		}
 	}
 

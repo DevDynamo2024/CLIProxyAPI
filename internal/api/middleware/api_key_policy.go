@@ -3,11 +3,13 @@ package middleware
 import (
 	"bytes"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
@@ -21,7 +23,7 @@ const (
 
 // APIKeyPolicyMiddleware enforces per-client API key restrictions and quotas.
 // It assumes AuthMiddleware already stored the authenticated key as gin context value "apiKey".
-func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQLiteDailyLimiter) gin.HandlerFunc {
+func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQLiteDailyLimiter, costReader billing.DailyCostReader) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c == nil || c.Request == nil {
 			return
@@ -46,11 +48,39 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 			c.Set(apiKeyPolicyContextKey, &copyPolicy)
 		}
 
+		policyValue, _ := c.Get(apiKeyPolicyContextKey)
+		policyEntry, _ := policyValue.(*config.APIKeyPolicy)
+
 		// Only enforce request-body model rules for JSON body endpoints.
 		// GET /v1/models is handled by response filtering.
 		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead || c.Request.Method == http.MethodOptions {
 			c.Next()
 			return
+		}
+
+		// 0) Daily budget limits (USD) - based on persisted usage cost.
+		if policyEntry != nil && policyEntry.DailyBudgetUSD > 0 {
+			if costReader == nil {
+				body := handlers.BuildErrorResponseBody(http.StatusInternalServerError, "billing store unavailable")
+				c.Abort()
+				c.Data(http.StatusInternalServerError, "application/json", body)
+				return
+			}
+			dayKey := policy.DayKeyChina(time.Now())
+			spentMicro, errSpent := costReader.GetDailyCostMicroUSD(c.Request.Context(), apiKey, dayKey)
+			if errSpent != nil {
+				body := handlers.BuildErrorResponseBody(http.StatusInternalServerError, errSpent.Error())
+				c.Abort()
+				c.Data(http.StatusInternalServerError, "application/json", body)
+				return
+			}
+			budgetMicro := int64(math.Round(policyEntry.DailyBudgetUSD * 1_000_000))
+			if budgetMicro > 0 && spentMicro >= budgetMicro {
+				body := handlers.BuildErrorResponseBody(http.StatusTooManyRequests, "daily budget exceeded")
+				c.Abort()
+				c.Data(http.StatusTooManyRequests, "application/json", body)
+				return
+			}
 		}
 
 		bodyBytes, err := io.ReadAll(c.Request.Body)
@@ -67,8 +97,6 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 		}
 
 		effectiveModel := model
-		policyValue, _ := c.Get(apiKeyPolicyContextKey)
-		policyEntry, _ := policyValue.(*config.APIKeyPolicy)
 
 		// 1) Transparent model downgrade rules.
 		if policyEntry != nil && !policyEntry.AllowsClaudeOpus46() {

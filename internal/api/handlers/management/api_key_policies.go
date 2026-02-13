@@ -56,6 +56,7 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		ExcludedModels    *[]string       `json:"excluded-models"`
 		AllowClaudeOpus46 *bool           `json:"allow-claude-opus-4-6"`
 		DailyLimits       *map[string]int `json:"daily-limits"`
+		DailyBudgetUSD    *float64        `json:"daily-budget-usd"`
 		APIKey            *string         `json:"api-key"`
 	}
 	var body struct {
@@ -110,6 +111,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 	if body.Value.DailyLimits != nil {
 		entry.DailyLimits = *body.Value.DailyLimits
+	}
+	if body.Value.DailyBudgetUSD != nil {
+		entry.DailyBudgetUSD = *body.Value.DailyBudgetUSD
 	}
 
 	if targetIndex >= 0 {

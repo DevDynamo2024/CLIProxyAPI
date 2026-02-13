@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 	"github.com/tidwall/gjson"
@@ -28,7 +30,7 @@ func TestAPIKeyPolicyMiddleware_DowngradesOpus46(t *testing.T) {
 		c.Set("apiKey", "k")
 		c.Next()
 	})
-	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil))
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, nil))
 	r.POST("/v1/chat/completions", func(c *gin.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
 		model := gjson.GetBytes(body, "model").String()
@@ -61,7 +63,7 @@ func TestAPIKeyPolicyMiddleware_ExcludedModelDenied(t *testing.T) {
 		c.Set("apiKey", "k")
 		c.Next()
 	})
-	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil))
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, nil))
 	r.POST("/v1/messages", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 	})
@@ -100,7 +102,7 @@ func TestAPIKeyPolicyMiddleware_DailyLimit(t *testing.T) {
 		c.Set("apiKey", "k")
 		c.Next()
 	})
-	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, limiter))
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, limiter, nil))
 	r.POST("/v1/chat/completions", func(c *gin.Context) {
 		c.JSON(200, gin.H{"ok": true})
 	})
@@ -118,6 +120,46 @@ func TestAPIKeyPolicyMiddleware_DailyLimit(t *testing.T) {
 	}
 	if w := makeReq(); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("second request status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+type stubCostReader struct {
+	cost int64
+	err  error
+}
+
+func (s stubCostReader) GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey string) (int64, error) {
+	return s.cost, s.err
+}
+
+func TestAPIKeyPolicyMiddleware_DailyBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		APIKeyPolicies: []config.APIKeyPolicy{
+			{APIKey: "k", DailyBudgetUSD: 10},
+		},
+	}
+	cfg.SanitizeAPIKeyPolicies()
+
+	reader := stubCostReader{cost: 10_000_000}
+	var _ billing.DailyCostReader = reader
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("apiKey", "k")
+		c.Next()
+	})
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, reader))
+	r.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"claude-opus-4-5-20251101"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
