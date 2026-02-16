@@ -153,7 +153,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
-#     base-url: "https://www.example.com" # use the custom claude API endpoint
+#     base-url: "https://www.example.com" # use the custom Claude API endpoint (or set ANTHROPIC_BASE_URL to override globally)
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override

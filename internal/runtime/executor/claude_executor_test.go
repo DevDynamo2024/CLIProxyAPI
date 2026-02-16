@@ -2,8 +2,10 @@ package executor
 
 import (
 	"bytes"
+	"net/http"
 	"testing"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -59,5 +61,40 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	}
 	if got := gjson.GetBytes(payload, "content_block.name").String(); got != "alpha" {
 		t.Fatalf("content_block.name = %q, want %q", got, "alpha")
+	}
+}
+
+func TestResolveClaudeBaseURL_EnvOverridesAndTrimsSlash(t *testing.T) {
+	t.Setenv(anthropicBaseURLEnv, "https://gateway.example.com/v1/acct/gw/anthropic/")
+
+	baseURL := resolveClaudeBaseURL(&cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"base_url": "https://should-not-win.example.com",
+		},
+	})
+	if baseURL != "https://gateway.example.com/v1/acct/gw/anthropic" {
+		t.Fatalf("baseURL = %q, want %q", baseURL, "https://gateway.example.com/v1/acct/gw/anthropic")
+	}
+}
+
+func TestApplyClaudeHeaders_EnvForcesXAPIKeyWhenUsingAPIKey(t *testing.T) {
+	t.Setenv(anthropicBaseURLEnv, "https://gateway.example.com/v1/acct/gw/anthropic")
+	req, err := http.NewRequest(http.MethodPost, "https://gateway.example.com/v1/acct/gw/anthropic/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "sk-ant-test",
+		},
+	}
+	applyClaudeHeaders(req, auth, "sk-ant-test", false, nil)
+
+	if got := req.Header.Get("x-api-key"); got != "sk-ant-test" {
+		t.Fatalf("x-api-key = %q, want %q", got, "sk-ant-test")
+	}
+	if got := req.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want empty", got)
 	}
 }

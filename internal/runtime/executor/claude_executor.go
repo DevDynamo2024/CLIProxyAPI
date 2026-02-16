@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -36,10 +37,25 @@ type ClaudeExecutor struct {
 }
 
 const claudeToolPrefix = "proxy_"
+const anthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+func resolveClaudeBaseURL(auth *cliproxyauth.Auth) string {
+	var baseURL string
+	if auth != nil && auth.Attributes != nil {
+		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	if env := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)); env != "" {
+		baseURL = env
+	}
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com"
+	}
+	return strings.TrimRight(baseURL, "/")
+}
 
 // PrepareRequest injects Claude credentials into the outgoing HTTP request.
 func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -51,7 +67,8 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com")
+	forceAnthropicBase := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)) != ""
+	isAnthropicBase := forceAnthropicBase || (req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com"))
 	if isAnthropicBase && useAPIKey {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", apiKey)
@@ -89,10 +106,8 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, _ := claudeCreds(auth)
+	baseURL := resolveClaudeBaseURL(auth)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -232,10 +247,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, _ := claudeCreds(auth)
+	baseURL := resolveClaudeBaseURL(auth)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -404,10 +417,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	apiKey, baseURL := claudeCreds(auth)
-	if baseURL == "" {
-		baseURL = "https://api.anthropic.com"
-	}
+	apiKey, _ := claudeCreds(auth)
+	baseURL := resolveClaudeBaseURL(auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -640,7 +651,8 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	isAnthropicBase := r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com")
+	forceAnthropicBase := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)) != ""
+	isAnthropicBase := forceAnthropicBase || (r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com"))
 	if isAnthropicBase && useAPIKey {
 		r.Header.Del("Authorization")
 		r.Header.Set("x-api-key", apiKey)
