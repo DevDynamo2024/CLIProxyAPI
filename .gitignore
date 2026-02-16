@@ -44,6 +44,7 @@ GEMINI.md
 .codex/*
 .claude/*
 .gemini/*
+.cli-proxy-api/*
 .serena/*
 .agent/*
 .agents/*

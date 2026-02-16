@@ -250,6 +250,17 @@ func isClaudeFailoverEligible(status int, err error) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
 		return true
+	case http.StatusBadGateway:
+		msg := strings.ToLower(extractErrorMessage(errString(err)))
+		if msg == "" {
+			return false
+		}
+		// When a provider isn't configured/registered, requests may fail before any upstream call.
+		// Only treat this as failover eligible when the error explicitly indicates an unknown provider.
+		if strings.Contains(msg, "unknown provider") && strings.Contains(msg, "model") {
+			return true
+		}
+		return false
 	case http.StatusBadRequest:
 		msg := strings.ToLower(extractErrorMessage(errString(err)))
 		if msg == "" {
@@ -280,6 +291,13 @@ func errString(err error) string {
 		return ""
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+func seemsClaudeModel(modelName string) bool {
+	resolved := util.ResolveAutoModel(modelName)
+	parsed := thinking.ParseSuffix(resolved)
+	base := strings.ToLower(strings.TrimSpace(parsed.ModelName))
+	return strings.HasPrefix(base, "claude-")
 }
 
 func containsProvider(providers []string, provider string) bool {
@@ -526,11 +544,42 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
-		return nil, errMsg
+		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+				failoverPayload := rewriteModelField(rawJSON, targetModel)
+				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
+				if detailErr == nil {
+					clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+					log.WithFields(log.Fields{
+						"component":       "failover",
+						"client_api_key":  clientKey,
+						"from_provider":   "claude",
+						"from_model":      modelName,
+						"to_model":        failoverModel,
+						"status_code":     errMsg.StatusCode,
+						"error_message":   extractErrorMessage(errString(errMsg.Error)),
+						"handler_format":  handlerType,
+						"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+						"reason":          "unknown_provider",
+					}).Warn("triggering automatic failover for Claude request (unknown provider)")
+
+					rawJSON = failoverPayload
+					providers = failoverProviders
+					normalizedModel = failoverModel
+				} else {
+					return nil, detailErr
+				}
+			} else {
+				return nil, errMsg
+			}
+		} else {
+			return nil, errMsg
+		}
 	}
-	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -628,11 +677,42 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
-		return nil, errMsg
+		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+				failoverPayload := rewriteModelField(rawJSON, targetModel)
+				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
+				if detailErr == nil {
+					clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+					log.WithFields(log.Fields{
+						"component":       "failover",
+						"client_api_key":  clientKey,
+						"from_provider":   "claude",
+						"from_model":      modelName,
+						"to_model":        failoverModel,
+						"status_code":     errMsg.StatusCode,
+						"error_message":   extractErrorMessage(errString(errMsg.Error)),
+						"handler_format":  handlerType,
+						"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+						"reason":          "unknown_provider",
+					}).Warn("triggering automatic failover for Claude count request (unknown provider)")
+
+					rawJSON = failoverPayload
+					providers = failoverProviders
+					normalizedModel = failoverModel
+				} else {
+					return nil, detailErr
+				}
+			} else {
+				return nil, errMsg
+			}
+		} else {
+			return nil, errMsg
+		}
 	}
-	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -715,14 +795,51 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, errChan
+		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+				failoverPayload := rewriteModelField(rawJSON, targetModel)
+				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
+				if detailErr == nil {
+					clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+					log.WithFields(log.Fields{
+						"component":       "failover",
+						"client_api_key":  clientKey,
+						"from_provider":   "claude",
+						"from_model":      modelName,
+						"to_model":        failoverModel,
+						"status_code":     errMsg.StatusCode,
+						"error_message":   extractErrorMessage(errString(errMsg.Error)),
+						"handler_format":  handlerType,
+						"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+						"reason":          "unknown_provider",
+					}).Warn("triggering automatic failover for Claude streaming request (unknown provider)")
+
+					rawJSON = failoverPayload
+					providers = failoverProviders
+					normalizedModel = failoverModel
+				} else {
+					errChan := make(chan *interfaces.ErrorMessage, 1)
+					errChan <- detailErr
+					close(errChan)
+					return nil, errChan
+				}
+			} else {
+				errChan := make(chan *interfaces.ErrorMessage, 1)
+				errChan <- errMsg
+				close(errChan)
+				return nil, errChan
+			}
+		} else {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- errMsg
+			close(errChan)
+			return nil, errChan
+		}
 	}
-	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {

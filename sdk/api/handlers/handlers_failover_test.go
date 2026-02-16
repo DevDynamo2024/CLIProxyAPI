@@ -192,6 +192,48 @@ func TestExecuteWithAuthManager_ClaudeFailoverDisabled(t *testing.T) {
 	}
 }
 
+func TestExecuteWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&okExecutor{id: "codex", payload: []byte("ok")})
+
+	codexAuth := &coreauth.Auth{ID: "codex-auth", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("manager.Register(codex): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", &internalconfig.APIKeyPolicy{
+		APIKey: "client-key",
+		Failover: internalconfig.APIKeyFailoverPolicy{
+			Claude: internalconfig.ProviderFailoverPolicy{
+				Enabled:     true,
+				TargetModel: "gpt-5.2(high)",
+			},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{"model":"claude-opus-4-6","stream":false}`)
+	resp, errMsg := handler.ExecuteWithAuthManager(ctx, "claude", "claude-opus-4-6", payload, "")
+	if errMsg != nil {
+		t.Fatalf("expected nil error, got: %+v", errMsg)
+	}
+	if string(resp) != "ok" {
+		t.Fatalf("expected ok, got %q", string(resp))
+	}
+}
+
 func TestExecuteStreamWithAuthManager_ClaudeFailoverBeforeFirstByte(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -233,6 +275,60 @@ func TestExecuteStreamWithAuthManager_ClaudeFailoverBeforeFirstByte(t *testing.T
 	ctx := context.WithValue(context.Background(), "gin", c)
 	payload := []byte(`{"model":"claude-model","stream":true}`)
 	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "claude", "claude-model", payload, "")
+	if dataChan == nil || errChan == nil {
+		t.Fatalf("expected non-nil channels")
+	}
+
+	var got []byte
+	for chunk := range dataChan {
+		got = append(got, chunk...)
+	}
+
+	for msg := range errChan {
+		if msg != nil {
+			t.Fatalf("unexpected error: %+v", msg)
+		}
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("expected ok, got %q", string(got))
+	}
+}
+
+func TestExecuteStreamWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&okExecutor{id: "codex", payload: []byte("ok")})
+
+	codexAuth := &coreauth.Auth{ID: "codex-auth", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("manager.Register(codex): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", &internalconfig.APIKeyPolicy{
+		APIKey: "client-key",
+		Failover: internalconfig.APIKeyFailoverPolicy{
+			Claude: internalconfig.ProviderFailoverPolicy{
+				Enabled:     true,
+				TargetModel: "gpt-5.2(high)",
+			},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{"model":"claude-opus-4-6","stream":true}`)
+	dataChan, errChan := handler.ExecuteStreamWithAuthManager(ctx, "claude", "claude-opus-4-6", payload, "")
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
