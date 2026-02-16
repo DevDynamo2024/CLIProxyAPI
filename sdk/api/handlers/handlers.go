@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -22,6 +23,9 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"golang.org/x/net/context"
 )
 
@@ -153,6 +157,157 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		key = uuid.NewString()
 	}
 	return map[string]any{idempotencyKeyMetadataKey: key}
+}
+
+func apiKeyPolicyFromContext(ctx context.Context) *internalconfig.APIKeyPolicy {
+	if ctx == nil {
+		return nil
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return nil
+	}
+	value, exists := ginCtx.Get("apiKeyPolicy")
+	if !exists || value == nil {
+		return nil
+	}
+	policy, ok := value.(*internalconfig.APIKeyPolicy)
+	if !ok || policy == nil {
+		return nil
+	}
+	return policy
+}
+
+func clientAPIKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return ""
+	}
+	return strings.TrimSpace(ginCtx.GetString("apiKey"))
+}
+
+type errorEnvelope struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error"`
+	Message string `json:"message"`
+}
+
+type statusHeadersError struct {
+	err   error
+	code  int
+	addon http.Header
+}
+
+func (e *statusHeadersError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *statusHeadersError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.code
+}
+
+func (e *statusHeadersError) Headers() http.Header {
+	if e == nil || e.addon == nil {
+		return nil
+	}
+	return e.addon
+}
+
+func extractErrorMessage(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !json.Valid([]byte(raw)) {
+		return raw
+	}
+	var env errorEnvelope
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		return raw
+	}
+	if msg := strings.TrimSpace(env.Error.Message); msg != "" {
+		return msg
+	}
+	if msg := strings.TrimSpace(env.Message); msg != "" {
+		return msg
+	}
+	return raw
+}
+
+func isClaudeFailoverEligible(status int, err error) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
+		return true
+	case http.StatusBadRequest:
+		msg := strings.ToLower(extractErrorMessage(errString(err)))
+		if msg == "" {
+			return false
+		}
+		// Only treat 400 as failover eligible when it looks like an auth/account scoped issue.
+		if strings.Contains(msg, "account") {
+			if strings.Contains(msg, "disabled") || strings.Contains(msg, "suspended") || strings.Contains(msg, "banned") || strings.Contains(msg, "blocked") {
+				return true
+			}
+			return true
+		}
+		if strings.Contains(msg, "token") ||
+			strings.Contains(msg, "oauth") ||
+			strings.Contains(msg, "credential") ||
+			strings.Contains(msg, "session") ||
+			strings.Contains(msg, "login") {
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimSpace(err.Error())
+}
+
+func containsProvider(providers []string, provider string) bool {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	if provider == "" || len(providers) == 0 {
+		return false
+	}
+	for _, p := range providers {
+		if strings.EqualFold(strings.TrimSpace(p), provider) {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteModelField(body []byte, model string) []byte {
+	model = strings.TrimSpace(model)
+	if len(body) == 0 || model == "" {
+		return body
+	}
+	if !gjson.GetBytes(body, "model").Exists() {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "model", model)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
@@ -392,23 +547,82 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
+
+	execOnce := func(execProviders []string, execReq coreexecutor.Request, execOpts coreexecutor.Options) ([]byte, *interfaces.ErrorMessage) {
+		resp, err := h.AuthManager.Execute(ctx, execProviders, execReq, execOpts)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
 			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
+			var addon http.Header
+			if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+				if hdr := he.Headers(); hdr != nil {
+					addon = hdr.Clone()
+				}
 			}
+			return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return resp.Payload, nil
 	}
-	return resp.Payload, nil
+
+	out, execErr := execOnce(providers, req, opts)
+	if execErr == nil {
+		return out, nil
+	}
+
+	// Optional per-client API key failover: Claude -> configured target model.
+	policy := apiKeyPolicyFromContext(ctx)
+	targetModel := ""
+	enabled := false
+	if policy != nil {
+		targetModel, enabled = policy.ClaudeFailoverTargetModel()
+	}
+	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
+		status := execErr.StatusCode
+		if status <= 0 {
+			status = statusFromError(execErr.Error)
+		}
+		if isClaudeFailoverEligible(status, execErr.Error) {
+			failoverPayload := rewriteModelField(rawJSON, targetModel)
+			failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
+			if detailErr == nil {
+				failoverReqMeta := make(map[string]any, len(reqMeta)+1)
+				for k, v := range reqMeta {
+					failoverReqMeta[k] = v
+				}
+				failoverReqMeta[coreexecutor.RequestedModelMetadataKey] = failoverModel
+				failoverReq := coreexecutor.Request{Model: failoverModel, Payload: failoverPayload}
+				failoverOpts := opts
+				failoverOpts.OriginalRequest = failoverPayload
+				failoverOpts.Metadata = failoverReqMeta
+
+				clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+				log.WithFields(log.Fields{
+					"component":       "failover",
+					"client_api_key":  clientKey,
+					"from_provider":   "claude",
+					"from_model":      normalizedModel,
+					"to_model":        failoverModel,
+					"status_code":     status,
+					"error_message":   extractErrorMessage(errString(execErr.Error)),
+					"handler_format":  handlerType,
+					"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+				}).Warn("triggering automatic failover for Claude request")
+
+				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
+				if failoverErr == nil {
+					return failoverOut, nil
+				}
+				return nil, failoverErr
+			}
+			_ = detailErr
+		}
+	}
+
+	return nil, execErr
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -435,23 +649,67 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
+
+	execOnce := func(execProviders []string, execReq coreexecutor.Request, execOpts coreexecutor.Options) ([]byte, *interfaces.ErrorMessage) {
+		resp, err := h.AuthManager.ExecuteCount(ctx, execProviders, execReq, execOpts)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+				if code := se.StatusCode(); code > 0 {
+					status = code
+				}
 			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
+			var addon http.Header
+			if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+				if hdr := he.Headers(); hdr != nil {
+					addon = hdr.Clone()
+				}
 			}
+			return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return resp.Payload, nil
 	}
-	return resp.Payload, nil
+
+	out, execErr := execOnce(providers, req, opts)
+	if execErr == nil {
+		return out, nil
+	}
+
+	policy := apiKeyPolicyFromContext(ctx)
+	targetModel := ""
+	enabled := false
+	if policy != nil {
+		targetModel, enabled = policy.ClaudeFailoverTargetModel()
+	}
+	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
+		status := execErr.StatusCode
+		if status <= 0 {
+			status = statusFromError(execErr.Error)
+		}
+		if isClaudeFailoverEligible(status, execErr.Error) {
+			failoverPayload := rewriteModelField(rawJSON, targetModel)
+			failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
+			if detailErr == nil {
+				failoverReqMeta := make(map[string]any, len(reqMeta)+1)
+				for k, v := range reqMeta {
+					failoverReqMeta[k] = v
+				}
+				failoverReqMeta[coreexecutor.RequestedModelMetadataKey] = failoverModel
+				failoverReq := coreexecutor.Request{Model: failoverModel, Payload: failoverPayload}
+				failoverOpts := opts
+				failoverOpts.OriginalRequest = failoverPayload
+				failoverOpts.Metadata = failoverReqMeta
+				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
+				if failoverErr == nil {
+					return failoverOut, nil
+				}
+				return nil, failoverErr
+			}
+			_ = detailErr
+		}
+	}
+
+	return nil, execErr
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
@@ -481,9 +739,21 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
+
+	var (
+		failoverTargetModel string
+		failoverEnabled     bool
+		failoverAttempted   bool
+	)
+	if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+		failoverTargetModel, failoverEnabled = policy.ClaudeFailoverTargetModel()
+	}
+
+	execStream := func(execProviders []string, execReq coreexecutor.Request, execOpts coreexecutor.Options) (<-chan coreexecutor.StreamChunk, *interfaces.ErrorMessage) {
+		stream, err := h.AuthManager.ExecuteStream(ctx, execProviders, execReq, execOpts)
+		if err == nil {
+			return stream, nil
+		}
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -496,10 +766,67 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				addon = hdr.Clone()
 			}
 		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-		close(errChan)
-		return nil, errChan
+		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
+
+	chunks, execErr := execStream(providers, req, opts)
+	if execErr != nil {
+		// Immediate failure before any chunks are available - consider failover.
+		status := execErr.StatusCode
+		if status <= 0 {
+			status = statusFromError(execErr.Error)
+		}
+		if failoverEnabled && containsProvider(providers, "claude") && failoverTargetModel != "" && failoverTargetModel != normalizedModel && isClaudeFailoverEligible(status, execErr.Error) {
+			failoverAttempted = true
+			failoverPayload := rewriteModelField(rawJSON, failoverTargetModel)
+			failoverProviders, failoverModel, detailErr := h.getRequestDetails(failoverTargetModel)
+			if detailErr == nil {
+				failoverReqMeta := make(map[string]any, len(reqMeta)+1)
+				for k, v := range reqMeta {
+					failoverReqMeta[k] = v
+				}
+				failoverReqMeta[coreexecutor.RequestedModelMetadataKey] = failoverModel
+				failoverReq := coreexecutor.Request{Model: failoverModel, Payload: failoverPayload}
+				failoverOpts := opts
+				failoverOpts.OriginalRequest = failoverPayload
+				failoverOpts.Metadata = failoverReqMeta
+
+				clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+				log.WithFields(log.Fields{
+					"component":       "failover",
+					"client_api_key":  clientKey,
+					"from_provider":   "claude",
+					"from_model":      normalizedModel,
+					"to_model":        failoverModel,
+					"status_code":     status,
+					"error_message":   extractErrorMessage(errString(execErr.Error)),
+					"handler_format":  handlerType,
+					"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+				}).Warn("triggering automatic failover for Claude streaming request")
+
+				chunks, execErr = execStream(failoverProviders, failoverReq, failoverOpts)
+				if execErr != nil {
+					errChan := make(chan *interfaces.ErrorMessage, 1)
+					errChan <- execErr
+					close(errChan)
+					return nil, errChan
+				}
+				// Update live variables for below goroutine.
+				providers = failoverProviders
+				normalizedModel = failoverModel
+				req = failoverReq
+				opts = failoverOpts
+			}
+			_ = detailErr
+		}
+		if execErr != nil {
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- execErr
+			close(errChan)
+			return nil, errChan
+		}
+	}
+
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
@@ -573,12 +900,60 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
-							retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-							if retryErr == nil {
+							retryChunks, retryExecErr := execStream(providers, req, opts)
+							if retryExecErr == nil {
 								chunks = retryChunks
 								continue outer
 							}
-							streamErr = retryErr
+							streamErr = &statusHeadersError{err: retryExecErr.Error, code: retryExecErr.StatusCode, addon: retryExecErr.Addon}
+						}
+					}
+
+					// Optional failover: only before any payload bytes are sent.
+					if !sentPayload && !failoverAttempted && failoverEnabled && containsProvider(providers, "claude") && failoverTargetModel != "" && failoverTargetModel != normalizedModel {
+						status := statusFromError(streamErr)
+						if isClaudeFailoverEligible(status, streamErr) {
+							failoverAttempted = true
+							failoverPayload := rewriteModelField(rawJSON, failoverTargetModel)
+							failoverProviders, failoverModel, detailErr := h.getRequestDetails(failoverTargetModel)
+							if detailErr == nil {
+								failoverReqMeta := make(map[string]any, len(reqMeta)+1)
+								for k, v := range reqMeta {
+									failoverReqMeta[k] = v
+								}
+								failoverReqMeta[coreexecutor.RequestedModelMetadataKey] = failoverModel
+								failoverReq := coreexecutor.Request{Model: failoverModel, Payload: failoverPayload}
+								failoverOpts := opts
+								failoverOpts.OriginalRequest = failoverPayload
+								failoverOpts.Metadata = failoverReqMeta
+
+								clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+								log.WithFields(log.Fields{
+									"component":       "failover",
+									"client_api_key":  clientKey,
+									"from_provider":   "claude",
+									"from_model":      normalizedModel,
+									"to_model":        failoverModel,
+									"status_code":     status,
+									"error_message":   extractErrorMessage(errString(streamErr)),
+									"handler_format":  handlerType,
+									"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
+								}).Warn("triggering automatic failover for Claude streaming request (pre-first-byte)")
+
+								retryChunks, retryExecErr := execStream(failoverProviders, failoverReq, failoverOpts)
+								if retryExecErr == nil {
+									// Swap state and restart outer loop on new chunks.
+									providers = failoverProviders
+									normalizedModel = failoverModel
+									req = failoverReq
+									opts = failoverOpts
+									chunks = retryChunks
+									bootstrapRetries = 0
+									continue outer
+								}
+								streamErr = &statusHeadersError{err: retryExecErr.Error, code: retryExecErr.StatusCode, addon: retryExecErr.Addon}
+							}
+							_ = detailErr
 						}
 					}
 

@@ -13,6 +13,11 @@ type APIKeyPolicy struct {
 	// Matching is case-insensitive. Supports '*' wildcard.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
+	// Failover controls automatic provider failover behaviour for this API key.
+	// It allows transparent retry against a configured target model when a provider becomes unavailable
+	// (e.g., Claude weekly cap, rolling-window caps, or account issues).
+	Failover APIKeyFailoverPolicy `yaml:"failover,omitempty" json:"failover,omitempty"`
+
 	// AllowClaudeOpus46 controls whether requests may use claude-opus-4-6.
 	// When false, the server will transparently downgrade claude-opus-4-6* to claude-opus-4-5-20251101*.
 	// Defaults to true when unset.
@@ -27,11 +32,44 @@ type APIKeyPolicy struct {
 	DailyBudgetUSD float64 `yaml:"daily-budget-usd,omitempty" json:"daily-budget-usd,omitempty"`
 }
 
+// ProviderFailoverPolicy defines per-provider automatic failover settings.
+type ProviderFailoverPolicy struct {
+	// Enabled toggles failover behaviour for the provider.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.2(high)").
+	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
+}
+
+// APIKeyFailoverPolicy groups failover configuration for a client API key.
+// Provider keys match internal provider identifiers (e.g. "claude").
+type APIKeyFailoverPolicy struct {
+	// Claude controls failover behaviour when the request is routed to the Claude provider.
+	Claude ProviderFailoverPolicy `yaml:"claude,omitempty" json:"claude,omitempty"`
+}
+
 func (p *APIKeyPolicy) AllowsClaudeOpus46() bool {
 	if p == nil || p.AllowClaudeOpus46 == nil {
 		return true
 	}
 	return *p.AllowClaudeOpus46
+}
+
+// ClaudeFailoverTargetModel resolves the configured Claude failover target model.
+// Returns ("", false) when failover is disabled.
+// When enabled but target-model is empty, it returns a safe default.
+func (p *APIKeyPolicy) ClaudeFailoverTargetModel() (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	if !p.Failover.Claude.Enabled {
+		return "", false
+	}
+	target := strings.TrimSpace(p.Failover.Claude.TargetModel)
+	if target == "" {
+		target = "gpt-5.2(high)"
+	}
+	return target, true
 }
 
 // FindAPIKeyPolicy returns the APIKeyPolicy matching the provided key.
@@ -72,6 +110,9 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		}
 
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+
+		// Failover sanitization.
+		entry.Failover.Claude.TargetModel = strings.TrimSpace(entry.Failover.Claude.TargetModel)
 
 		if len(entry.DailyLimits) > 0 {
 			normalized := make(map[string]int, len(entry.DailyLimits))

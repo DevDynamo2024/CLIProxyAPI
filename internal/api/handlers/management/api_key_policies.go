@@ -52,11 +52,19 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		return
 	}
 
+	type providerFailoverPatch struct {
+		Enabled     *bool   `json:"enabled"`
+		TargetModel *string `json:"target-model"`
+	}
+	type failoverPatch struct {
+		Claude *providerFailoverPatch `json:"claude"`
+	}
 	type policyPatch struct {
 		ExcludedModels    *[]string       `json:"excluded-models"`
 		AllowClaudeOpus46 *bool           `json:"allow-claude-opus-4-6"`
 		DailyLimits       *map[string]int `json:"daily-limits"`
 		DailyBudgetUSD    *float64        `json:"daily-budget-usd"`
+		Failover          *failoverPatch  `json:"failover"`
 		APIKey            *string         `json:"api-key"`
 	}
 	var body struct {
@@ -114,6 +122,14 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 	if body.Value.DailyBudgetUSD != nil {
 		entry.DailyBudgetUSD = *body.Value.DailyBudgetUSD
+	}
+	if body.Value.Failover != nil && body.Value.Failover.Claude != nil {
+		if body.Value.Failover.Claude.Enabled != nil {
+			entry.Failover.Claude.Enabled = *body.Value.Failover.Claude.Enabled
+		}
+		if body.Value.Failover.Claude.TargetModel != nil {
+			entry.Failover.Claude.TargetModel = strings.TrimSpace(*body.Value.Failover.Claude.TargetModel)
+		}
 	}
 
 	if targetIndex >= 0 {
