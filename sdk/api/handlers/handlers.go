@@ -250,6 +250,19 @@ func isClaudeFailoverEligible(status int, err error) bool {
 	switch status {
 	case http.StatusTooManyRequests, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusForbidden:
 		return true
+	case http.StatusInternalServerError:
+		msg := strings.ToLower(extractErrorMessage(errString(err)))
+		if msg == "" {
+			return false
+		}
+		// When no Claude auth is currently selectable (all cooled down / unavailable),
+		// the core auth manager can return an internal error like:
+		//   "auth_unavailable: no auth available"
+		// Treat this as failover eligible so clients can transparently route to Codex.
+		if strings.Contains(msg, "auth_unavailable") || strings.Contains(msg, "auth_not_found") || strings.Contains(msg, "no auth available") {
+			return true
+		}
+		return false
 	case http.StatusBadGateway:
 		msg := strings.ToLower(extractErrorMessage(errString(err)))
 		if msg == "" {
