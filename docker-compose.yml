@@ -18,7 +18,8 @@ services:
       DEPLOY: ${DEPLOY:-}
     ports:
       - "8317:8317"
-      - "8085:8085"
+      # Gemini OAuth callback port (host port can be overridden to avoid conflicts)
+      - "${CLI_PROXY_GEMINI_CALLBACK_HOST_PORT:-8085}:8085"
       - "1455:1455"
       - "54545:54545"
       - "51121:51121"
