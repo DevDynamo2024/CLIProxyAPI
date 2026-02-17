@@ -1153,6 +1153,27 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 		providers = util.GetProviderName(resolvedModelName)
 	}
 
+	// Heuristic fallback when the registry isn't warmed up yet (or a new model is used).
+	// This path is intentionally scoped to request routing (not generic provider lookup),
+	// so callers that depend on "registry only" semantics (e.g. AMP mapping) remain unchanged.
+	if len(providers) == 0 {
+		lower := strings.ToLower(strings.TrimSpace(baseModel))
+		switch {
+		case strings.HasPrefix(lower, "claude-"):
+			providers = []string{"claude"}
+		case strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3") || strings.HasPrefix(lower, "o4") || strings.HasPrefix(lower, "chatgpt-"):
+			providers = []string{"codex"}
+		case strings.HasPrefix(lower, "gemini") || strings.HasPrefix(lower, "models/gemini") || strings.HasPrefix(lower, "vertex") || strings.HasPrefix(lower, "aistudio"):
+			providers = []string{"gemini"}
+		case strings.HasPrefix(lower, "qwen"):
+			providers = []string{"qwen"}
+		case strings.HasPrefix(lower, "kimi"):
+			providers = []string{"kimi"}
+		case strings.HasPrefix(lower, "iflow"):
+			providers = []string{"iflow"}
+		}
+	}
+
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}

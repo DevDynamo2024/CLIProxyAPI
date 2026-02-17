@@ -1660,6 +1660,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	requireRegistrySupport := modelKey != "" && registryRef != nil && len(registryRef.GetModelProviders(modelKey)) > 0
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
 			continue
@@ -1667,7 +1668,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		// Only enforce per-client model support when the model is known to the registry.
+		// When the registry isn't warmed up yet (or a new model is used), allow a best-effort attempt.
+		if requireRegistrySupport && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1722,6 +1725,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		}
 	}
 	registryRef := registry.GetGlobalRegistry()
+	requireRegistrySupport := modelKey != "" && registryRef != nil && len(registryRef.GetModelProviders(modelKey)) > 0
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
 			continue
@@ -1739,7 +1743,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 		if _, ok := m.executors[providerKey]; !ok {
 			continue
 		}
-		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+		// Only enforce per-client model support when the model is known to the registry.
+		// When the registry isn't warmed up yet (or a new model is used), allow a best-effort attempt.
+		if requireRegistrySupport && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
 		candidates = append(candidates, candidate)

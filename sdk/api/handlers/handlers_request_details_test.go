@@ -76,6 +76,13 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			wantErr:       true,
 		},
 		{
+			name:          "claude heuristic fallback when unregistered",
+			inputModel:    "claude-unregistered-unit-test-9f8c7a(high)",
+			wantProviders: []string{"claude"},
+			wantModel:     "claude-unregistered-unit-test-9f8c7a(high)",
+			wantErr:       false,
+		},
+		{
 			name:          "auto suffix resolved",
 			inputModel:    "auto(high)",
 			wantProviders: []string{"gemini"},
