@@ -4,6 +4,11 @@ WORKDIR /app
 
 COPY go.mod go.sum ./
 
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
+
 RUN go mod download
 
 COPY . .
