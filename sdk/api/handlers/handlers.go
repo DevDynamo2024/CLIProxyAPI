@@ -341,6 +341,56 @@ func rewriteModelField(body []byte, model string) []byte {
 	return out
 }
 
+// responseModelFieldPaths lists JSON paths where model name may appear in API responses.
+var responseModelFieldPaths = []string{"model", "message.model"}
+
+// rewriteResponseModelFields rewrites known model JSON paths in an API response
+// so the client sees the originally-requested model instead of the failover target.
+// This prevents usage-tracking tools (e.g. ccusage) from recording the fallback model.
+func rewriteResponseModelFields(data []byte, model string) []byte {
+	if len(data) == 0 || model == "" {
+		return data
+	}
+	for _, path := range responseModelFieldPaths {
+		if gjson.GetBytes(data, path).Exists() {
+			if out, err := sjson.SetBytes(data, path, model); err == nil {
+				data = out
+			}
+		}
+	}
+	return data
+}
+
+// rewriteStreamChunkModelFields rewrites model fields in streaming response
+// chunks which may be raw JSON or SSE-formatted ("data: {json}\n").
+func rewriteStreamChunkModelFields(chunk []byte, model string) []byte {
+	if len(chunk) == 0 || model == "" {
+		return chunk
+	}
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return rewriteResponseModelFields(chunk, model)
+	}
+	lines := bytes.Split(chunk, []byte("\n"))
+	modified := false
+	for i, line := range lines {
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			jsonData := bytes.TrimPrefix(line, []byte("data: "))
+			if len(jsonData) > 0 && jsonData[0] == '{' {
+				rewritten := rewriteResponseModelFields(jsonData, model)
+				if !bytes.Equal(rewritten, jsonData) {
+					lines[i] = append([]byte("data: "), rewritten...)
+					modified = true
+				}
+			}
+		}
+	}
+	if modified {
+		return bytes.Join(lines, []byte("\n"))
+	}
+	return chunk
+}
+
 // BaseAPIHandler contains the handlers for API endpoints.
 // It holds a pool of clients to interact with the backend service and manages
 // load balancing, client selection, and configuration.
@@ -559,6 +609,7 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
 			targetModel, enabled := policy.ClaudeFailoverTargetModel()
@@ -632,6 +683,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 	out, execErr := execOnce(providers, req, opts)
 	if execErr == nil {
+		if originalRequestedModel != normalizedModel {
+			out = rewriteResponseModelFields(out, originalRequestedModel)
+		}
 		return out, nil
 	}
 
@@ -676,7 +730,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
-					return failoverOut, nil
+					return rewriteResponseModelFields(failoverOut, originalRequestedModel), nil
 				}
 				return nil, failoverErr
 			}
@@ -692,6 +746,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
 			targetModel, enabled := policy.ClaudeFailoverTargetModel()
@@ -765,6 +820,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 	out, execErr := execOnce(providers, req, opts)
 	if execErr == nil {
+		if originalRequestedModel != normalizedModel {
+			out = rewriteResponseModelFields(out, originalRequestedModel)
+		}
 		return out, nil
 	}
 
@@ -794,7 +852,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				failoverOpts.Metadata = failoverReqMeta
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
-					return failoverOut, nil
+					return rewriteResponseModelFields(failoverOut, originalRequestedModel), nil
 				}
 				return nil, failoverErr
 			}
@@ -810,6 +868,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
 			targetModel, enabled := policy.ClaudeFailoverTargetModel()
@@ -1104,7 +1163,11 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				}
 				if len(chunk.Payload) > 0 {
 					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+					payload := cloneBytes(chunk.Payload)
+					if originalRequestedModel != normalizedModel {
+						payload = rewriteStreamChunkModelFields(payload, originalRequestedModel)
+					}
+					if okSendData := sendData(payload); !okSendData {
 						return
 					}
 				}
