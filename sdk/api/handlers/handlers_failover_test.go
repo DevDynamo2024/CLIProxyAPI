@@ -98,6 +98,46 @@ func (e *okExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request)
 	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
 }
 
+type recordModelExecutor struct {
+	id        string
+	payload   []byte
+	lastModel *string
+}
+
+func (e *recordModelExecutor) Identifier() string { return e.id }
+
+func (e *recordModelExecutor) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	if e.lastModel != nil {
+		*e.lastModel = req.Model
+	}
+	return coreexecutor.Response{Payload: bytes.Clone(e.payload)}, nil
+}
+
+func (e *recordModelExecutor) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+	if e.lastModel != nil {
+		*e.lastModel = req.Model
+	}
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{Payload: bytes.Clone(e.payload)}
+	close(ch)
+	return ch, nil
+}
+
+func (e *recordModelExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *recordModelExecutor) CountTokens(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	if e.lastModel != nil {
+		*e.lastModel = req.Model
+	}
+	return coreexecutor.Response{Payload: bytes.Clone(e.payload)}, nil
+}
+
+func (e *recordModelExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
 func TestExecuteWithAuthManager_ClaudeFailoverEnabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -144,6 +184,63 @@ func TestExecuteWithAuthManager_ClaudeFailoverEnabled(t *testing.T) {
 	}
 	if string(resp) != "ok" {
 		t.Fatalf("expected ok, got %q", string(resp))
+	}
+}
+
+func TestExecuteWithAuthManager_ClaudeFailoverModelRule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&failStatusExecutor{id: "claude", status: http.StatusTooManyRequests, msg: "weekly cap"})
+
+	var gotModel string
+	manager.RegisterExecutor(&recordModelExecutor{id: "codex", payload: []byte("ok"), lastModel: &gotModel})
+
+	claudeAuth := &coreauth.Auth{ID: "claude-auth", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), claudeAuth); err != nil {
+		t.Fatalf("manager.Register(claude): %v", err)
+	}
+	codexAuth := &coreauth.Auth{ID: "codex-auth", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("manager.Register(codex): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-sonnet-4-6"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.3-codex"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", &internalconfig.APIKeyPolicy{
+		APIKey: "client-key",
+		Failover: internalconfig.APIKeyFailoverPolicy{
+			Claude: internalconfig.ProviderFailoverPolicy{
+				Enabled:     true,
+				TargetModel: "gpt-5.2(high)",
+				Rules: []internalconfig.ModelFailoverRule{
+					{FromModel: "claude-sonnet-4-6*", TargetModel: "gpt-5.3-codex(high)"},
+				},
+			},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{"model":"claude-sonnet-4-6","stream":false}`)
+	resp, errMsg := handler.ExecuteWithAuthManager(ctx, "claude", "claude-sonnet-4-6", payload, "")
+	if errMsg != nil {
+		t.Fatalf("expected nil error, got: %+v", errMsg)
+	}
+	if string(resp) != "ok" {
+		t.Fatalf("expected ok, got %q", string(resp))
+	}
+	if gotModel != "gpt-5.3-codex(high)" {
+		t.Fatalf("expected failover model %q, got %q", "gpt-5.3-codex(high)", gotModel)
 	}
 }
 

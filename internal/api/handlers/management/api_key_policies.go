@@ -53,8 +53,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 
 	type providerFailoverPatch struct {
-		Enabled     *bool   `json:"enabled"`
-		TargetModel *string `json:"target-model"`
+		Enabled     *bool                       `json:"enabled"`
+		TargetModel *string                     `json:"target-model"`
+		Rules       *[]config.ModelFailoverRule `json:"rules"`
 	}
 	type failoverPatch struct {
 		Claude *providerFailoverPatch `json:"claude"`
@@ -129,6 +130,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		}
 		if body.Value.Failover.Claude.TargetModel != nil {
 			entry.Failover.Claude.TargetModel = strings.TrimSpace(*body.Value.Failover.Claude.TargetModel)
+		}
+		if body.Value.Failover.Claude.Rules != nil {
+			entry.Failover.Claude.Rules = append([]config.ModelFailoverRule(nil), (*body.Value.Failover.Claude.Rules)...)
 		}
 	}
 

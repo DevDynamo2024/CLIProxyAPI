@@ -2,6 +2,8 @@ package config
 
 import (
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 )
 
 // APIKeyPolicy defines restrictions and quotas applied to an authenticated client API key.
@@ -39,6 +41,16 @@ type ProviderFailoverPolicy struct {
 
 	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.2(high)").
 	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
+
+	// Rules optionally override the target model based on the requested model.
+	// Matching is case-insensitive and supports '*' wildcard.
+	Rules []ModelFailoverRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+// ModelFailoverRule defines a model-specific failover target.
+type ModelFailoverRule struct {
+	FromModel   string `yaml:"from-model,omitempty" json:"from-model,omitempty"`
+	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
 }
 
 // APIKeyFailoverPolicy groups failover configuration for a client API key.
@@ -70,6 +82,37 @@ func (p *APIKeyPolicy) ClaudeFailoverTargetModel() (string, bool) {
 		target = "gpt-5.2(high)"
 	}
 	return target, true
+}
+
+// ClaudeFailoverTargetModelFor resolves the configured Claude failover target model for a specific request.
+// Rules are evaluated first; when no rules match, it falls back to ClaudeFailoverTargetModel().
+func (p *APIKeyPolicy) ClaudeFailoverTargetModelFor(requestedModel string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	if !p.Failover.Claude.Enabled {
+		return "", false
+	}
+
+	requestKey := policy.NormaliseModelKey(requestedModel)
+	if requestKey != "" && len(p.Failover.Claude.Rules) > 0 {
+		for _, rule := range p.Failover.Claude.Rules {
+			from := strings.ToLower(strings.TrimSpace(rule.FromModel))
+			if from == "" {
+				continue
+			}
+			if !policy.MatchWildcard(from, requestKey) {
+				continue
+			}
+			target := strings.TrimSpace(rule.TargetModel)
+			if target == "" {
+				continue
+			}
+			return target, true
+		}
+	}
+
+	return p.ClaudeFailoverTargetModel()
 }
 
 // FindAPIKeyPolicy returns the APIKeyPolicy matching the provided key.
@@ -113,6 +156,18 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 
 		// Failover sanitization.
 		entry.Failover.Claude.TargetModel = strings.TrimSpace(entry.Failover.Claude.TargetModel)
+		if len(entry.Failover.Claude.Rules) > 0 {
+			rules := make([]ModelFailoverRule, 0, len(entry.Failover.Claude.Rules))
+			for _, rule := range entry.Failover.Claude.Rules {
+				rule.FromModel = strings.TrimSpace(rule.FromModel)
+				rule.TargetModel = strings.TrimSpace(rule.TargetModel)
+				if rule.FromModel == "" || rule.TargetModel == "" {
+					continue
+				}
+				rules = append(rules, rule)
+			}
+			entry.Failover.Claude.Rules = rules
+		}
 
 		if len(entry.DailyLimits) > 0 {
 			normalized := make(map[string]int, len(entry.DailyLimits))

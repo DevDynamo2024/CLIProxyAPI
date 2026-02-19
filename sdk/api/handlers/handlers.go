@@ -612,7 +612,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
 			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
@@ -694,7 +694,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	targetModel := ""
 	enabled := false
 	if policy != nil {
-		targetModel, enabled = policy.ClaudeFailoverTargetModel()
+		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(modelName)
 	}
 	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
 		status := execErr.StatusCode
@@ -749,7 +749,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
 			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
@@ -830,7 +830,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	targetModel := ""
 	enabled := false
 	if policy != nil {
-		targetModel, enabled = policy.ClaudeFailoverTargetModel()
+		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(modelName)
 	}
 	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
 		status := execErr.StatusCode
@@ -871,7 +871,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModel()
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
 			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
@@ -935,7 +935,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		failoverAttempted   bool
 	)
 	if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-		failoverTargetModel, failoverEnabled = policy.ClaudeFailoverTargetModel()
+		failoverTargetModel, failoverEnabled = policy.ClaudeFailoverTargetModelFor(modelName)
 	}
 
 	execStream := func(execProviders []string, execReq coreexecutor.Request, execOpts coreexecutor.Options) (<-chan coreexecutor.StreamChunk, *interfaces.ErrorMessage) {

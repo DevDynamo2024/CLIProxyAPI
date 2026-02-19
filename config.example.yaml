@@ -40,7 +40,8 @@ api-keys:
 # Per-client API key policies (restrictions and daily limits).
 # - excluded-models supports '*' wildcard matching and is case-insensitive.
 # - allow-claude-opus-4-6: when false, requests for claude-opus-4-6* are downgraded to claude-opus-4-5-20251101*.
-# - failover: optional per-provider automatic retry to a target model when a provider becomes unavailable
+# - failover: optional per-provider automatic retry to a target model when a provider becomes unavailable.
+#   Supports model-specific rules to override the target based on the requested model (wildcards supported).
 #   (e.g. Claude weekly cap / rolling-window caps / account issues). Useful for automatically switching to Codex.
 # - daily-limits: request counts are tracked per day in China Standard Time (UTC+8).
 # - Storage: daily counters are persisted in SQLite at APIKEY_POLICY_SQLITE_PATH (or a default path under the writable directory).
@@ -51,7 +52,12 @@ api-key-policies:
     failover:
       claude:
         enabled: true
-        target-model: "gpt-5.2(high)"
+        target-model: "gpt-5.2(high)" # default fallback when no rules match
+        rules:
+          - from-model: "claude-opus-4-6*"
+            target-model: "gpt-5.2(high)"
+          - from-model: "claude-sonnet-4-6*"
+            target-model: "gpt-5.3-codex(high)"
     allow-claude-opus-4-6: true
     daily-limits:
       claude-opus-4-6: 10
