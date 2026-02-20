@@ -159,32 +159,33 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, 52_428_800) // 50MB
+	var param any
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		appendAPIResponseChunk(ctx, e.cfg, line)
 
-	lines := bytes.Split(data, []byte("\n"))
-	for _, line := range lines {
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
-
-		line = bytes.TrimSpace(line[5:])
-		if gjson.GetBytes(line, "type").String() != "response.completed" {
+		data := bytes.TrimSpace(line[5:])
+		if gjson.GetBytes(data, "type").String() != "response.completed" {
 			continue
 		}
 
-		if detail, ok := parseCodexUsage(line); ok {
+		if detail, ok := parseCodexUsage(data); ok {
 			reporter.publish(ctx, detail)
 		}
+		reporter.ensurePublished(ctx)
 
-		var param any
-		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
+		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)
 		resp = cliproxyexecutor.Response{Payload: []byte(out)}
 		return resp, nil
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		recordAPIResponseError(ctx, e.cfg, errScan)
+		return resp, errScan
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
