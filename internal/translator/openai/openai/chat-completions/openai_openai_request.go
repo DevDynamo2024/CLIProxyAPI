@@ -3,6 +3,10 @@
 package chat_completions
 
 import (
+	"fmt"
+	"strings"
+
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -17,14 +21,75 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
 func ConvertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
-	// Update the "model" field in the JSON payload with the provided modelName
-	// The sjson.SetBytes function returns a new byte slice with the updated JSON.
-	updatedJSON, err := sjson.SetBytes(inputRawJSON, "model", modelName)
-	if err != nil {
-		// If there's an error, return the original JSON or handle the error appropriately.
-		// For now, we'll return the original, but in a real scenario, logging or a more robust error
-		// handling mechanism would be needed.
-		return inputRawJSON
+	out := inputRawJSON
+
+	// Update the "model" field in the JSON payload with the provided modelName.
+	// If it fails, keep the original payload.
+	if updatedJSON, err := sjson.SetBytes(out, "model", modelName); err == nil {
+		out = updatedJSON
 	}
-	return updatedJSON
+
+	// Some clients may persist provider-specific "thinking" blocks in messages history.
+	// OpenAI-compatible backends can reject these with errors like:
+	//   messages.N.content.M: Invalid `signature` in `thinking` block
+	// To keep failover (e.g., Claude -> GPT) resilient, strip thinking blocks on OpenAI-format requests.
+	out = stripThinkingBlocksFromOpenAIMessages(out)
+
+	return out
+}
+
+func stripThinkingBlocksFromOpenAIMessages(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	msgs := messages.Array()
+	for i := 0; i < len(msgs); i++ {
+		contentPath := fmt.Sprintf("messages.%d.content", i)
+		content := gjson.GetBytes(out, contentPath)
+		if !content.Exists() {
+			continue
+		}
+
+		switch {
+		case content.IsArray():
+			parts := content.Array()
+			removed := false
+			for j := len(parts) - 1; j >= 0; j-- {
+				partType := strings.TrimSpace(strings.ToLower(parts[j].Get("type").String()))
+				if partType == "thinking" || partType == "redacted_thinking" {
+					if updated, err := sjson.DeleteBytes(out, fmt.Sprintf("%s.%d", contentPath, j)); err == nil {
+						out = updated
+						removed = true
+					}
+				}
+			}
+
+			// Avoid emitting empty content arrays; replace with empty string for broad compatibility.
+			if removed {
+				updatedContent := gjson.GetBytes(out, contentPath)
+				if updatedContent.IsArray() && len(updatedContent.Array()) == 0 {
+					if updated, err := sjson.SetBytes(out, contentPath, ""); err == nil {
+						out = updated
+					}
+				}
+			}
+
+		case content.IsObject():
+			partType := strings.TrimSpace(strings.ToLower(content.Get("type").String()))
+			if partType == "thinking" || partType == "redacted_thinking" {
+				if updated, err := sjson.SetBytes(out, contentPath, ""); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+
+	return out
 }
