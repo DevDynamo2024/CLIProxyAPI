@@ -148,50 +148,74 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
+
+	// Claude OAuth tool prefixing can invalidate interleaved-thinking signatures once the client replays
+	// assistant thinking blocks in subsequent turns. To keep multi-turn sessions stable, strip thinking
+	// blocks from the replayed history before sending upstream. (Client still receives original content.)
 	if isClaudeOAuthToken(apiKey) {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+		bodyForTranslation = stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return resp, err
-	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+	var httpResp *http.Response
+	var bodyForUpstream []byte
+	for attempt := 0; attempt < 2; attempt++ {
+		bodyForUpstream = bodyForTranslation
+		if isClaudeOAuthToken(apiKey) {
+			bodyForUpstream = applyClaudeToolPrefix(bodyForTranslation, claudeToolPrefix)
+		}
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+		if errReq != nil {
+			return resp, errReq
+		}
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
+		}
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      bodyForUpstream,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpResp, err = httpClient.Do(httpReq)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
+
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+
+		// Retry once by stripping thinking blocks from replayed history when Anthropic rejects signatures.
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
+			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
+			if !bytes.Equal(sanitized, bodyForTranslation) {
+				bodyForTranslation = sanitized
+				continue
+			}
+		}
+
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -287,49 +311,70 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
-	bodyForUpstream := body
+
+	// See Execute(): avoid replaying assistant thinking blocks when OAuth tool prefixing is active.
 	if isClaudeOAuthToken(apiKey) {
-		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
+		bodyForTranslation = stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 	}
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
-	if err != nil {
-		return nil, err
-	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      bodyForUpstream,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
-	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return nil, err
-	}
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+	var httpResp *http.Response
+	var bodyForUpstream []byte
+	for attempt := 0; attempt < 2; attempt++ {
+		bodyForUpstream = bodyForTranslation
+		if isClaudeOAuthToken(apiKey) {
+			bodyForUpstream = applyClaudeToolPrefix(bodyForTranslation, claudeToolPrefix)
+		}
+
+		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+		if errReq != nil {
+			return nil, errReq
+		}
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
+		}
+		recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      bodyForUpstream,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+
+		httpResp, err = httpClient.Do(httpReq)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
+		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+		if httpResp.StatusCode >= 200 && httpResp.StatusCode < 300 {
+			break
+		}
+
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
+			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
+			if !bytes.Equal(sanitized, bodyForTranslation) {
+				bodyForTranslation = sanitized
+				continue
+			}
+		}
+
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -435,6 +480,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	if isClaudeOAuthToken(apiKey) {
+		body = stripThinkingBlocksFromClaudePayload(body)
 		body = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
 
@@ -758,6 +804,81 @@ func checkSystemInstructions(payload []byte) []byte {
 
 func isClaudeOAuthToken(apiKey string) bool {
 	return strings.Contains(apiKey, "sk-ant-oat")
+}
+
+// stripThinkingBlocksFromClaudePayload removes thinking/redacted_thinking content parts
+// from messages and system blocks. This is used as a safety valve to avoid upstream
+// signature validation failures when clients replay assistant thinking blocks.
+func stripThinkingBlocksFromClaudePayload(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	out := body
+
+	// Strip thinking blocks from system (if any).
+	if system := gjson.GetBytes(out, "system"); system.Exists() && system.IsArray() {
+		parts := system.Array()
+		for i := len(parts) - 1; i >= 0; i-- {
+			t := strings.ToLower(strings.TrimSpace(parts[i].Get("type").String()))
+			if t == "thinking" || t == "redacted_thinking" {
+				if updated, err := sjson.DeleteBytes(out, fmt.Sprintf("system.%d", i)); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+
+	// Strip thinking blocks from messages.
+	messages := gjson.GetBytes(out, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return out
+	}
+	msgs := messages.Array()
+	for mi := len(msgs) - 1; mi >= 0; mi-- {
+		contentPath := fmt.Sprintf("messages.%d.content", mi)
+		content := gjson.GetBytes(out, contentPath)
+		if !content.Exists() || !content.IsArray() {
+			continue
+		}
+
+		parts := content.Array()
+		for ci := len(parts) - 1; ci >= 0; ci-- {
+			t := strings.ToLower(strings.TrimSpace(parts[ci].Get("type").String()))
+			if t == "thinking" || t == "redacted_thinking" {
+				if updated, err := sjson.DeleteBytes(out, fmt.Sprintf("%s.%d", contentPath, ci)); err == nil {
+					out = updated
+				}
+			}
+		}
+
+		updatedContent := gjson.GetBytes(out, contentPath)
+		if updatedContent.IsArray() && len(updatedContent.Array()) == 0 {
+			if updated, err := sjson.DeleteBytes(out, fmt.Sprintf("messages.%d", mi)); err == nil {
+				out = updated
+			}
+		}
+	}
+
+	return out
+}
+
+func isInvalidThinkingSignatureError(status int, body []byte) bool {
+	if status != http.StatusBadRequest {
+		return false
+	}
+	msg := ""
+	if gjson.ValidBytes(body) {
+		msg = strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
+		if msg == "" {
+			msg = strings.TrimSpace(gjson.GetBytes(body, "message").String())
+		}
+	}
+	if msg == "" {
+		msg = strings.TrimSpace(string(body))
+	}
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, "invalid `signature` in `thinking` block") || strings.Contains(msg, "invalid signature in thinking block")
 }
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {
