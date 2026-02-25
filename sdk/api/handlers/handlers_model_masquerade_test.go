@@ -223,6 +223,69 @@ func TestExecuteWithAuthManager_FailoverRewritesModelInResponse(t *testing.T) {
 	}
 }
 
+func TestExecuteWithAuthManager_ModelRoutingRewritesModelInResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+
+	// Claude executor fails; if routing works, it shouldn't be used.
+	manager.RegisterExecutor(&failStatusExecutor{id: "claude", status: http.StatusInternalServerError, msg: "should not be called"})
+	// Codex executor succeeds with a response containing gpt-5.2 model field.
+	routeResp := []byte(`{"id":"msg_route","model":"gpt-5.2","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}]}`)
+	manager.RegisterExecutor(&okExecutor{id: "codex", payload: routeResp})
+
+	claudeAuth := &coreauth.Auth{ID: "claude-auth-route", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), claudeAuth); err != nil {
+		t.Fatalf("register claude: %v", err)
+	}
+	codexAuth := &coreauth.Auth{ID: "codex-auth-route", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("register codex: %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", &internalconfig.APIKeyPolicy{
+		APIKey: "client-key",
+		ModelRouting: internalconfig.APIKeyModelRoutingPolicy{
+			Rules: []internalconfig.ModelRoutingRule{
+				{
+					FromModel:           "claude-opus-4-6*",
+					TargetModel:         "gpt-5.2(high)",
+					TargetPercent:       100,
+					StickyWindowSeconds: 3600,
+				},
+			},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{"model":"claude-opus-4-6","stream":false}`)
+	resp, errMsg := handler.ExecuteWithAuthManager(ctx, "claude", "claude-opus-4-6", payload, "")
+	if errMsg != nil {
+		t.Fatalf("expected nil error, got: %+v", errMsg)
+	}
+
+	// The response must have model rewritten to the original requested model.
+	gotModel := gjson.GetBytes(resp, "model").String()
+	if gotModel != "claude-opus-4-6" {
+		t.Errorf("expected response model=claude-opus-4-6, got %q (routed model leaked)", gotModel)
+	}
+
+	if got := w.Header().Get(effectiveModelHeaderKey); got != "gpt-5.2(high)" {
+		t.Errorf("expected %s header=gpt-5.2(high), got %q", effectiveModelHeaderKey, got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration: streaming failover rewrites model in chunked response
 // ---------------------------------------------------------------------------

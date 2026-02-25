@@ -40,6 +40,7 @@ api-keys:
 # Per-client API key policies (restrictions and daily limits).
 # - excluded-models supports '*' wildcard matching and is case-insensitive.
 # - allow-claude-opus-4-6: when false, requests for claude-opus-4-6* are downgraded to claude-opus-4-5-20251101*.
+# - model-routing: optional deterministic time-window routing to a target model (e.g. split Claude -> Codex by hour).
 # - failover: optional per-provider automatic retry to a target model when a provider becomes unavailable.
 #   Supports model-specific rules to override the target based on the requested model (wildcards supported).
 #   (e.g. Claude weekly cap / rolling-window caps / account issues). Useful for automatically switching to Codex.
@@ -49,6 +50,18 @@ api-key-policies:
   - api-key: "your-api-key-1"
     excluded-models:
       - "claude-haiku-4-5-20251001"
+    model-routing:
+      rules:
+        - enabled: true
+          from-model: "claude-opus-4-6*"
+          target-model: "gpt-5.2(high)"
+          target-percent: 50
+          sticky-window-seconds: 3600
+        - enabled: true
+          from-model: "claude-sonnet-4-6*"
+          target-model: "gpt-5.3-codex(high)"
+          target-percent: 50
+          sticky-window-seconds: 3600
     failover:
       claude:
         enabled: true

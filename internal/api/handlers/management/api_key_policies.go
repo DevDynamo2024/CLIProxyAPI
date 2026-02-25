@@ -52,6 +52,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		return
 	}
 
+	type modelRoutingPatch struct {
+		Rules *[]config.ModelRoutingRule `json:"rules"`
+	}
 	type providerFailoverPatch struct {
 		Enabled     *bool                       `json:"enabled"`
 		TargetModel *string                     `json:"target-model"`
@@ -61,12 +64,13 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		Claude *providerFailoverPatch `json:"claude"`
 	}
 	type policyPatch struct {
-		ExcludedModels    *[]string       `json:"excluded-models"`
-		AllowClaudeOpus46 *bool           `json:"allow-claude-opus-4-6"`
-		DailyLimits       *map[string]int `json:"daily-limits"`
-		DailyBudgetUSD    *float64        `json:"daily-budget-usd"`
-		Failover          *failoverPatch  `json:"failover"`
-		APIKey            *string         `json:"api-key"`
+		ModelRouting      *modelRoutingPatch `json:"model-routing"`
+		ExcludedModels    *[]string          `json:"excluded-models"`
+		AllowClaudeOpus46 *bool              `json:"allow-claude-opus-4-6"`
+		DailyLimits       *map[string]int    `json:"daily-limits"`
+		DailyBudgetUSD    *float64           `json:"daily-budget-usd"`
+		Failover          *failoverPatch     `json:"failover"`
+		APIKey            *string            `json:"api-key"`
 	}
 	var body struct {
 		APIKey string       `json:"api-key"`
@@ -113,6 +117,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.ModelRouting != nil && body.Value.ModelRouting.Rules != nil {
+		entry.ModelRouting.Rules = append([]config.ModelRoutingRule(nil), (*body.Value.ModelRouting.Rules)...)
 	}
 	if body.Value.AllowClaudeOpus46 != nil {
 		v := *body.Value.AllowClaudeOpus46

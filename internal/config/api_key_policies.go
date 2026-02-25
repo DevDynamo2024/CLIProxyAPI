@@ -1,7 +1,9 @@
 package config
 
 import (
+	"hash/fnv"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 )
@@ -14,6 +16,11 @@ type APIKeyPolicy struct {
 	// ExcludedModels lists model IDs or wildcard patterns that this API key is NOT allowed to access.
 	// Matching is case-insensitive. Supports '*' wildcard.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// ModelRouting optionally rewrites an incoming request model to a configured target model.
+	// This supports deterministic time-window split routing for coherence (e.g. 50% of 1h windows
+	// routed to Codex while still presenting the original requested model to the client).
+	ModelRouting APIKeyModelRoutingPolicy `yaml:"model-routing,omitempty" json:"model-routing,omitempty"`
 
 	// Failover controls automatic provider failover behaviour for this API key.
 	// It allows transparent retry against a configured target model when a provider becomes unavailable
@@ -32,6 +39,37 @@ type APIKeyPolicy struct {
 	// DailyBudgetUSD defines the maximum daily spend (USD) allowed for this API key.
 	// Values <= 0 are treated as disabled.
 	DailyBudgetUSD float64 `yaml:"daily-budget-usd,omitempty" json:"daily-budget-usd,omitempty"`
+}
+
+// APIKeyModelRoutingPolicy groups model routing configuration for a client API key.
+type APIKeyModelRoutingPolicy struct {
+	Rules []ModelRoutingRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+// ModelRoutingRule deterministically routes a subset of time windows to a target model.
+// Matching is case-insensitive and supports '*' wildcard on from-model.
+type ModelRoutingRule struct {
+	// Enabled toggles routing for this rule. Defaults to true when unset.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	FromModel string `yaml:"from-model,omitempty" json:"from-model,omitempty"`
+
+	// TargetModel is the model ID to execute when the rule routes to target.
+	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
+
+	// TargetPercent is the percentage (0-100) of time windows that should route to TargetModel.
+	TargetPercent int `yaml:"target-percent,omitempty" json:"target-percent,omitempty"`
+
+	// StickyWindowSeconds is the routing time window size in seconds. Defaults to 3600 when <= 0.
+	StickyWindowSeconds int `yaml:"sticky-window-seconds,omitempty" json:"sticky-window-seconds,omitempty"`
+}
+
+type ModelRoutingDecision struct {
+	FromModel           string
+	TargetModel         string
+	TargetPercent       int
+	StickyWindowSeconds int
+	Bucket              int64
 }
 
 // ProviderFailoverPolicy defines per-provider automatic failover settings.
@@ -58,6 +96,102 @@ type ModelFailoverRule struct {
 type APIKeyFailoverPolicy struct {
 	// Claude controls failover behaviour when the request is routed to the Claude provider.
 	Claude ProviderFailoverPolicy `yaml:"claude,omitempty" json:"claude,omitempty"`
+}
+
+// RoutedModelFor resolves the effective model that should be executed for a request.
+// It returns the target model and a decision object when routing to target is selected.
+// When no rule matches or the decision keeps the original model, it returns ("", nil).
+func (p *APIKeyPolicy) RoutedModelFor(apiKey, requestedModel string, now time.Time) (string, *ModelRoutingDecision) {
+	if p == nil {
+		return "", nil
+	}
+	requestKey := policy.NormaliseModelKey(requestedModel)
+	if requestKey == "" || len(p.ModelRouting.Rules) == 0 {
+		return "", nil
+	}
+	key := strings.TrimSpace(apiKey)
+	if key == "" {
+		key = strings.TrimSpace(p.APIKey)
+	}
+	for _, rule := range p.ModelRouting.Rules {
+		if rule.Enabled != nil && !*rule.Enabled {
+			continue
+		}
+		from := strings.ToLower(strings.TrimSpace(rule.FromModel))
+		if from == "" {
+			continue
+		}
+		if !policy.MatchWildcard(from, requestKey) {
+			continue
+		}
+		target := strings.TrimSpace(rule.TargetModel)
+		if target == "" {
+			return "", nil
+		}
+
+		percent := rule.TargetPercent
+		if percent < 0 {
+			percent = 0
+		}
+		if percent > 100 {
+			percent = 100
+		}
+		if percent == 0 {
+			return "", nil
+		}
+		if percent == 100 {
+			return target, &ModelRoutingDecision{
+				FromModel:           from,
+				TargetModel:         target,
+				TargetPercent:       percent,
+				StickyWindowSeconds: normalizeStickyWindowSeconds(rule.StickyWindowSeconds),
+				Bucket:              routingBucket(now, normalizeStickyWindowSeconds(rule.StickyWindowSeconds)),
+			}
+		}
+
+		window := normalizeStickyWindowSeconds(rule.StickyWindowSeconds)
+		bucket := routingBucket(now, window)
+		phase := routingPhase(key, requestKey)
+		n := bucket + phase
+		value := (n * int64(percent)) % 100
+		if value < int64(percent) {
+			return target, &ModelRoutingDecision{
+				FromModel:           from,
+				TargetModel:         target,
+				TargetPercent:       percent,
+				StickyWindowSeconds: window,
+				Bucket:              bucket,
+			}
+		}
+		return "", nil
+	}
+	return "", nil
+}
+
+func normalizeStickyWindowSeconds(seconds int) int {
+	if seconds <= 0 {
+		return 3600
+	}
+	return seconds
+}
+
+func routingBucket(now time.Time, windowSeconds int) int64 {
+	if windowSeconds <= 0 {
+		windowSeconds = 3600
+	}
+	sec := now.Unix()
+	if sec < 0 {
+		sec = 0
+	}
+	return sec / int64(windowSeconds)
+}
+
+func routingPhase(apiKey, requestedModelKey string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(apiKey))))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(requestedModelKey))))
+	return int64(h.Sum32() % 100)
 }
 
 func (p *APIKeyPolicy) AllowsClaudeOpus46() bool {
@@ -153,6 +287,29 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		}
 
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+
+		// Routing sanitization.
+		if len(entry.ModelRouting.Rules) > 0 {
+			rules := make([]ModelRoutingRule, 0, len(entry.ModelRouting.Rules))
+			for _, rule := range entry.ModelRouting.Rules {
+				rule.FromModel = strings.TrimSpace(rule.FromModel)
+				rule.TargetModel = strings.TrimSpace(rule.TargetModel)
+				if rule.TargetPercent < 0 {
+					rule.TargetPercent = 0
+				}
+				if rule.TargetPercent > 100 {
+					rule.TargetPercent = 100
+				}
+				if rule.StickyWindowSeconds < 0 {
+					rule.StickyWindowSeconds = 0
+				}
+				if rule.FromModel == "" || rule.TargetModel == "" {
+					continue
+				}
+				rules = append(rules, rule)
+			}
+			entry.ModelRouting.Rules = rules
+		}
 
 		// Failover sanitization.
 		entry.Failover.Claude.TargetModel = strings.TrimSpace(entry.Failover.Claude.TargetModel)

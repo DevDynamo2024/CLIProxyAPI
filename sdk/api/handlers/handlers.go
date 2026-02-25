@@ -50,6 +50,7 @@ type ErrorDetail struct {
 }
 
 const idempotencyKeyMetadataKey = "idempotency_key"
+const effectiveModelHeaderKey = "X-CPA-Effective-Model"
 
 const (
 	defaultStreamingKeepAliveSeconds = 0
@@ -311,6 +312,38 @@ func seemsClaudeModel(modelName string) bool {
 	parsed := thinking.ParseSuffix(resolved)
 	base := strings.ToLower(strings.TrimSpace(parsed.ModelName))
 	return strings.HasPrefix(base, "claude-")
+}
+
+func resolveAutoModelForMasking(modelName string) string {
+	trimmed := strings.TrimSpace(modelName)
+	if trimmed == "" {
+		return ""
+	}
+	initialSuffix := thinking.ParseSuffix(trimmed)
+	if initialSuffix.ModelName == "auto" {
+		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+		if initialSuffix.HasSuffix {
+			return fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
+		}
+		return resolvedBase
+	}
+	return util.ResolveAutoModel(trimmed)
+}
+
+func setEffectiveModelHeader(ctx context.Context, requestedModel, effectiveModel string) {
+	req := strings.TrimSpace(requestedModel)
+	eff := strings.TrimSpace(effectiveModel)
+	if req == "" || eff == "" || req == eff {
+		return
+	}
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Header(effectiveModelHeaderKey, eff)
 }
 
 func containsProvider(providers []string, provider string) bool {
@@ -608,12 +641,38 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
+	requestedModel := strings.TrimSpace(modelName)
+	originalRequestedModel := resolveAutoModelForMasking(requestedModel)
+	routedModel := requestedModel
+	if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+		target, decision := policy.RoutedModelFor(clientAPIKeyFromContext(ctx), requestedModel, time.Now())
+		if decision != nil && strings.TrimSpace(target) != "" && target != requestedModel {
+			routedModel = target
+			rawJSON = rewriteModelField(rawJSON, target)
+
+			clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+			log.WithFields(log.Fields{
+				"component":             "model_routing",
+				"client_api_key":        clientKey,
+				"from_model":            requestedModel,
+				"to_model":              target,
+				"target_percent":        decision.TargetPercent,
+				"sticky_window_seconds": decision.StickyWindowSeconds,
+				"bucket":                decision.Bucket,
+				"handler_format":        handlerType,
+				"idempotency_key":       reqMeta[idempotencyKeyMetadataKey],
+			}).Info("routing request model via api key policy")
+		}
+	}
+
+	providers, normalizedModel, errMsg := h.getRequestDetails(routedModel)
+	if originalRequestedModel == "" {
+		originalRequestedModel = normalizedModel
+	}
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
-			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(requestedModel)
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != requestedModel && seemsClaudeModel(routedModel) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
 				if detailErr == nil {
@@ -622,7 +681,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 						"component":       "failover",
 						"client_api_key":  clientKey,
 						"from_provider":   "claude",
-						"from_model":      modelName,
+						"from_model":      routedModel,
 						"to_model":        failoverModel,
 						"status_code":     errMsg.StatusCode,
 						"error_message":   extractErrorMessage(errString(errMsg.Error)),
@@ -634,6 +693,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					return nil, detailErr
 				}
@@ -683,6 +743,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 	out, execErr := execOnce(providers, req, opts)
 	if execErr == nil {
+		setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 		if originalRequestedModel != normalizedModel {
 			out = rewriteResponseModelFields(out, originalRequestedModel)
 		}
@@ -694,7 +755,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	targetModel := ""
 	enabled := false
 	if policy != nil {
-		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(modelName)
+		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(requestedModel)
 	}
 	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
 		status := execErr.StatusCode
@@ -730,6 +791,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
+					setEffectiveModelHeader(ctx, originalRequestedModel, failoverModel)
 					return rewriteResponseModelFields(failoverOut, originalRequestedModel), nil
 				}
 				return nil, failoverErr
@@ -745,12 +807,38 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
+	requestedModel := strings.TrimSpace(modelName)
+	originalRequestedModel := resolveAutoModelForMasking(requestedModel)
+	routedModel := requestedModel
+	if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+		target, decision := policy.RoutedModelFor(clientAPIKeyFromContext(ctx), requestedModel, time.Now())
+		if decision != nil && strings.TrimSpace(target) != "" && target != requestedModel {
+			routedModel = target
+			rawJSON = rewriteModelField(rawJSON, target)
+
+			clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+			log.WithFields(log.Fields{
+				"component":             "model_routing",
+				"client_api_key":        clientKey,
+				"from_model":            requestedModel,
+				"to_model":              target,
+				"target_percent":        decision.TargetPercent,
+				"sticky_window_seconds": decision.StickyWindowSeconds,
+				"bucket":                decision.Bucket,
+				"handler_format":        handlerType,
+				"idempotency_key":       reqMeta[idempotencyKeyMetadataKey],
+			}).Info("routing request model via api key policy")
+		}
+	}
+
+	providers, normalizedModel, errMsg := h.getRequestDetails(routedModel)
+	if originalRequestedModel == "" {
+		originalRequestedModel = normalizedModel
+	}
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
-			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(requestedModel)
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != requestedModel && seemsClaudeModel(routedModel) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
 				if detailErr == nil {
@@ -759,7 +847,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 						"component":       "failover",
 						"client_api_key":  clientKey,
 						"from_provider":   "claude",
-						"from_model":      modelName,
+						"from_model":      routedModel,
 						"to_model":        failoverModel,
 						"status_code":     errMsg.StatusCode,
 						"error_message":   extractErrorMessage(errString(errMsg.Error)),
@@ -771,6 +859,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					return nil, detailErr
 				}
@@ -820,6 +909,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 	out, execErr := execOnce(providers, req, opts)
 	if execErr == nil {
+		setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 		if originalRequestedModel != normalizedModel {
 			out = rewriteResponseModelFields(out, originalRequestedModel)
 		}
@@ -830,7 +920,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	targetModel := ""
 	enabled := false
 	if policy != nil {
-		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(modelName)
+		targetModel, enabled = policy.ClaudeFailoverTargetModelFor(requestedModel)
 	}
 	if enabled && containsProvider(providers, "claude") && strings.TrimSpace(targetModel) != "" && targetModel != normalizedModel {
 		status := execErr.StatusCode
@@ -852,6 +942,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				failoverOpts.Metadata = failoverReqMeta
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
+					setEffectiveModelHeader(ctx, originalRequestedModel, failoverModel)
 					return rewriteResponseModelFields(failoverOut, originalRequestedModel), nil
 				}
 				return nil, failoverErr
@@ -867,12 +958,38 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
 	reqMeta := requestExecutionMetadata(ctx)
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	originalRequestedModel := normalizedModel // preserve for response model masquerading after failover
+	requestedModel := strings.TrimSpace(modelName)
+	originalRequestedModel := resolveAutoModelForMasking(requestedModel)
+	routedModel := requestedModel
+	if policy := apiKeyPolicyFromContext(ctx); policy != nil {
+		target, decision := policy.RoutedModelFor(clientAPIKeyFromContext(ctx), requestedModel, time.Now())
+		if decision != nil && strings.TrimSpace(target) != "" && target != requestedModel {
+			routedModel = target
+			rawJSON = rewriteModelField(rawJSON, target)
+
+			clientKey := util.HideAPIKey(clientAPIKeyFromContext(ctx))
+			log.WithFields(log.Fields{
+				"component":             "model_routing",
+				"client_api_key":        clientKey,
+				"from_model":            requestedModel,
+				"to_model":              target,
+				"target_percent":        decision.TargetPercent,
+				"sticky_window_seconds": decision.StickyWindowSeconds,
+				"bucket":                decision.Bucket,
+				"handler_format":        handlerType,
+				"idempotency_key":       reqMeta[idempotencyKeyMetadataKey],
+			}).Info("routing request model via api key policy")
+		}
+	}
+
+	providers, normalizedModel, errMsg := h.getRequestDetails(routedModel)
+	if originalRequestedModel == "" {
+		originalRequestedModel = normalizedModel
+	}
 	if errMsg != nil {
 		if policy := apiKeyPolicyFromContext(ctx); policy != nil {
-			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(modelName)
-			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != modelName && seemsClaudeModel(modelName) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
+			targetModel, enabled := policy.ClaudeFailoverTargetModelFor(requestedModel)
+			if enabled && strings.TrimSpace(targetModel) != "" && targetModel != requestedModel && seemsClaudeModel(routedModel) && isClaudeFailoverEligible(errMsg.StatusCode, errMsg.Error) {
 				failoverPayload := rewriteModelField(rawJSON, targetModel)
 				failoverProviders, failoverModel, detailErr := h.getRequestDetails(targetModel)
 				if detailErr == nil {
@@ -881,7 +998,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 						"component":       "failover",
 						"client_api_key":  clientKey,
 						"from_provider":   "claude",
-						"from_model":      modelName,
+						"from_model":      routedModel,
 						"to_model":        failoverModel,
 						"status_code":     errMsg.StatusCode,
 						"error_message":   extractErrorMessage(errString(errMsg.Error)),
@@ -893,6 +1010,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					errChan := make(chan *interfaces.ErrorMessage, 1)
 					errChan <- detailErr
@@ -1005,6 +1123,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 				normalizedModel = failoverModel
 				req = failoverReq
 				opts = failoverOpts
+				setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 			}
 			_ = detailErr
 		}
@@ -1016,6 +1135,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		}
 	}
 
+	setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
