@@ -43,13 +43,37 @@ func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecu
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
-func resolveClaudeBaseURL(auth *cliproxyauth.Auth) string {
+func isAnthropicAPIKey(token string) bool {
+	token = strings.TrimSpace(token)
+	return token != "" && strings.HasPrefix(token, "sk-ant")
+}
+
+func resolveClaudeBaseURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	// Proxy URL has higher priority than ANTHROPIC_BASE_URL-style gateway overrides:
+	// when a proxy is configured, prefer direct upstream base URL (with proxy transport),
+	// otherwise allow a global Anthropic base URL override.
+	var proxyURL string
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+
 	var baseURL string
 	if auth != nil && auth.Attributes != nil {
 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	if env := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)); env != "" {
-		baseURL = env
+	if proxyURL == "" {
+		if cfg != nil {
+			if v := strings.TrimSpace(cfg.AnthropicBaseURL); v != "" {
+				baseURL = v
+			} else if env := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)); env != "" {
+				baseURL = env
+			}
+		} else if env := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)); env != "" {
+			baseURL = env
+		}
 	}
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
@@ -66,10 +90,7 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	if strings.TrimSpace(apiKey) == "" {
 		return nil
 	}
-	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	forceAnthropicBase := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)) != ""
-	isAnthropicBase := forceAnthropicBase || (req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") && strings.EqualFold(req.URL.Host, "api.anthropic.com"))
-	if isAnthropicBase && useAPIKey {
+	if isAnthropicAPIKey(apiKey) {
 		req.Header.Del("Authorization")
 		req.Header.Set("x-api-key", apiKey)
 	} else {
@@ -107,7 +128,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, _ := claudeCreds(auth)
-	baseURL := resolveClaudeBaseURL(auth)
+	baseURL := resolveClaudeBaseURL(e.cfg, auth)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -272,7 +293,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, _ := claudeCreds(auth)
-	baseURL := resolveClaudeBaseURL(auth)
+	baseURL := resolveClaudeBaseURL(e.cfg, auth)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -463,7 +484,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	apiKey, _ := claudeCreds(auth)
-	baseURL := resolveClaudeBaseURL(auth)
+	baseURL := resolveClaudeBaseURL(e.cfg, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
@@ -696,13 +717,11 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 }
 
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
-	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
-	forceAnthropicBase := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)) != ""
-	isAnthropicBase := forceAnthropicBase || (r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com"))
-	if isAnthropicBase && useAPIKey {
+	if isAnthropicAPIKey(apiKey) {
 		r.Header.Del("Authorization")
 		r.Header.Set("x-api-key", apiKey)
 	} else {
+		r.Header.Del("x-api-key")
 		r.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	r.Header.Set("Content-Type", "application/json")

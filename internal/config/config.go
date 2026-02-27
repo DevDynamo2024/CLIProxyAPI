@@ -585,6 +585,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.Pprof.Addr = DefaultPprofAddr
 	}
 
+	cfg.ProxyURL = strings.TrimSpace(cfg.ProxyURL)
+	cfg.AnthropicBaseURL = strings.TrimSpace(cfg.AnthropicBaseURL)
+	cfg.AnthropicOAuthAuthURL = strings.TrimSpace(cfg.AnthropicOAuthAuthURL)
+	cfg.AnthropicOAuthTokenURL = strings.TrimSpace(cfg.AnthropicOAuthTokenURL)
+
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
 	}

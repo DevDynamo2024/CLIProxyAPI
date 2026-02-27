@@ -19,10 +19,10 @@ import (
 
 // OAuth configuration constants for Claude/Anthropic
 const (
-	AuthURL     = "https://claude.ai/oauth/authorize"
-	TokenURL    = "https://console.anthropic.com/v1/oauth/token"
-	ClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	RedirectURI = "http://localhost:54545/callback"
+	defaultAuthURL  = "https://claude.ai/oauth/authorize"
+	defaultTokenURL = "https://console.anthropic.com/v1/oauth/token"
+	ClientID        = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	RedirectURI     = "http://localhost:54545/callback"
 )
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.
@@ -47,6 +47,8 @@ type tokenResponse struct {
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
 	httpClient *http.Client
+	authURL    string
+	tokenURL   string
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -61,8 +63,22 @@ type ClaudeAuth struct {
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
+	authURL := defaultAuthURL
+	tokenURL := defaultTokenURL
+	var sdkCfg *config.SDKConfig
+	if cfg != nil {
+		sdkCfg = &cfg.SDKConfig
+		if v := strings.TrimSpace(cfg.AnthropicOAuthAuthURL); v != "" {
+			authURL = v
+		}
+		if v := strings.TrimSpace(cfg.AnthropicOAuthTokenURL); v != "" {
+			tokenURL = v
+		}
+	}
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(&cfg.SDKConfig),
+		httpClient: NewAnthropicHttpClient(sdkCfg),
+		authURL:    authURL,
+		tokenURL:   tokenURL,
 	}
 }
 
@@ -94,7 +110,11 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"state":                 {state},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	base := strings.TrimSpace(o.authURL)
+	if base == "" {
+		base = defaultAuthURL
+	}
+	authURL := fmt.Sprintf("%s?%s", base, params.Encode())
 	return authURL, state, nil
 }
 
@@ -157,7 +177,11 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 
 	// log.Debugf("Token exchange request: %s", string(jsonBody))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	tokenURL := strings.TrimSpace(o.tokenURL)
+	if tokenURL == "" {
+		tokenURL = defaultTokenURL
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -234,7 +258,11 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	tokenURL := strings.TrimSpace(o.tokenURL)
+	if tokenURL == "" {
+		tokenURL = defaultTokenURL
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}

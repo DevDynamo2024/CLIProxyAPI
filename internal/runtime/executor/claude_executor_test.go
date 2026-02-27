@@ -67,7 +67,7 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 func TestResolveClaudeBaseURL_EnvOverridesAndTrimsSlash(t *testing.T) {
 	t.Setenv(anthropicBaseURLEnv, "https://gateway.example.com/v1/acct/gw/anthropic/")
 
-	baseURL := resolveClaudeBaseURL(&cliproxyauth.Auth{
+	baseURL := resolveClaudeBaseURL(nil, &cliproxyauth.Auth{
 		Attributes: map[string]string{
 			"base_url": "https://should-not-win.example.com",
 		},
@@ -77,8 +77,21 @@ func TestResolveClaudeBaseURL_EnvOverridesAndTrimsSlash(t *testing.T) {
 	}
 }
 
-func TestApplyClaudeHeaders_EnvForcesXAPIKeyWhenUsingAPIKey(t *testing.T) {
-	t.Setenv(anthropicBaseURLEnv, "https://gateway.example.com/v1/acct/gw/anthropic")
+func TestResolveClaudeBaseURL_ProxyBeatsEnvOverride(t *testing.T) {
+	t.Setenv(anthropicBaseURLEnv, "https://gateway.example.com/v1/acct/gw/anthropic/")
+
+	baseURL := resolveClaudeBaseURL(nil, &cliproxyauth.Auth{
+		ProxyURL: "socks5://127.0.0.1:1080",
+		Attributes: map[string]string{
+			"base_url": "https://custom.example.com",
+		},
+	})
+	if baseURL != "https://custom.example.com" {
+		t.Fatalf("baseURL = %q, want %q", baseURL, "https://custom.example.com")
+	}
+}
+
+func TestApplyClaudeHeaders_AnthropicAPIKeyUsesXAPIKey(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://gateway.example.com/v1/acct/gw/anthropic/v1/messages", nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)

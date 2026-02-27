@@ -103,6 +103,14 @@ usage-statistics-enabled: false
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
+# Optional: override Anthropic Messages API base URL (alternative to env ANTHROPIC_BASE_URL).
+# Note: when proxy-url is configured, the server prefers using the direct upstream base URL with the proxy transport.
+anthropic-base-url: ""
+
+# Optional: override Anthropic OAuth endpoints (useful when claude.ai / console.anthropic.com are only reachable via a reverse proxy).
+anthropic-oauth-auth-url: ""  # default: https://claude.ai/oauth/authorize
+anthropic-oauth-token-url: "" # default: https://console.anthropic.com/v1/oauth/token
+
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
