@@ -47,7 +47,6 @@ type tokenResponse struct {
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
 	httpClient *http.Client
-	authURL    string
 	tokenURL   string
 }
 
@@ -63,21 +62,16 @@ type ClaudeAuth struct {
 func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
-	authURL := defaultAuthURL
 	tokenURL := defaultTokenURL
 	var sdkCfg *config.SDKConfig
 	if cfg != nil {
 		sdkCfg = &cfg.SDKConfig
-		if v := strings.TrimSpace(cfg.AnthropicOAuthAuthURL); v != "" {
-			authURL = v
-		}
 		if v := strings.TrimSpace(cfg.AnthropicOAuthTokenURL); v != "" {
 			tokenURL = v
 		}
 	}
 	return &ClaudeAuth{
 		httpClient: NewAnthropicHttpClient(sdkCfg),
-		authURL:    authURL,
 		tokenURL:   tokenURL,
 	}
 }
@@ -110,11 +104,7 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"state":                 {state},
 	}
 
-	base := strings.TrimSpace(o.authURL)
-	if base == "" {
-		base = defaultAuthURL
-	}
-	authURL := fmt.Sprintf("%s?%s", base, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", defaultAuthURL, params.Encode())
 	return authURL, state, nil
 }
 

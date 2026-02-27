@@ -14,10 +14,6 @@ type SDKConfig struct {
 	// When ProxyURL is configured, callers may prefer direct upstream base URL + proxy over a gateway base URL.
 	AnthropicBaseURL string `yaml:"anthropic-base-url,omitempty" json:"anthropic-base-url,omitempty"`
 
-	// AnthropicOAuthAuthURL overrides the OAuth authorization endpoint used to build the login URL.
-	// Default: https://claude.ai/oauth/authorize
-	AnthropicOAuthAuthURL string `yaml:"anthropic-oauth-auth-url,omitempty" json:"anthropic-oauth-auth-url,omitempty"`
-
 	// AnthropicOAuthTokenURL overrides the OAuth token endpoint used for code exchange and refresh.
 	// Default: https://console.anthropic.com/v1/oauth/token
 	AnthropicOAuthTokenURL string `yaml:"anthropic-oauth-token-url,omitempty" json:"anthropic-oauth-token-url,omitempty"`
