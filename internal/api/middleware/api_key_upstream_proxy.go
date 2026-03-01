@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -78,8 +80,37 @@ func APIKeyUpstreamProxyMiddleware(getConfig func() *config.Config) gin.HandlerF
 		}
 
 		c.Abort()
-		proxyHandler.ServeHTTP(c.Writer, c.Request)
+		proxyHandler.ServeHTTP(proxyResponseWriter{ResponseWriter: c.Writer}, c.Request)
 	}
+}
+
+// proxyResponseWriter hides http.CloseNotifier to prevent panics in gin's CloseNotify delegation
+// when the underlying writer doesn't implement it (e.g. in tests or wrapped writers).
+// It still forwards Flusher/Hijacker/Pusher when supported.
+type proxyResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (w proxyResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w proxyResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("hijack not supported")
+	}
+	return hijacker.Hijack()
+}
+
+func (w proxyResponseWriter) Push(target string, opts *http.PushOptions) error {
+	pusher, ok := w.ResponseWriter.(http.Pusher)
+	if !ok {
+		return http.ErrNotSupported
+	}
+	return pusher.Push(target, opts)
 }
 
 func newAPIKeyUpstreamReverseProxy(upstreamBaseURL string, cfg *config.Config) (*httputil.ReverseProxy, error) {
