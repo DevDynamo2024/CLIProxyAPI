@@ -368,6 +368,7 @@ func (s *Server) setupRoutes() {
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
 	v1.Use(middleware.APIKeyPolicyMiddleware(func() *config.Config { return s.cfg }, s.dailyLimiter, s.billingStore))
+	v1.Use(middleware.APIKeyUpstreamProxyMiddleware(func() *config.Config { return s.cfg }))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)

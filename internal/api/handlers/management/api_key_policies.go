@@ -65,6 +65,7 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 	type policyPatch struct {
 		ModelRouting      *modelRoutingPatch `json:"model-routing"`
+		UpstreamBaseURL   *string            `json:"upstream-base-url"`
 		ExcludedModels    *[]string          `json:"excluded-models"`
 		AllowClaudeOpus46 *bool              `json:"allow-claude-opus-4-6"`
 		DailyLimits       *map[string]int    `json:"daily-limits"`
@@ -117,6 +118,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.UpstreamBaseURL != nil {
+		entry.UpstreamBaseURL = strings.TrimSpace(*body.Value.UpstreamBaseURL)
 	}
 	if body.Value.ModelRouting != nil && body.Value.ModelRouting.Rules != nil {
 		entry.ModelRouting.Rules = append([]config.ModelRoutingRule(nil), (*body.Value.ModelRouting.Rules)...)

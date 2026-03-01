@@ -13,6 +13,16 @@ import (
 type APIKeyPolicy struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// UpstreamBaseURL overrides the upstream API base URL for this client API key.
+	// When set, /v1/* requests will be transparently proxied to this base URL instead of
+	// routing to the configured providers in this server. This is useful for chaining
+	// CLIProxyAPI instances (per-client upstream proxy routing).
+	//
+	// Examples:
+	//   - "http://127.0.0.1:8001" (incoming /v1/models -> http://127.0.0.1:8001/v1/models)
+	//   - "http://127.0.0.1:8001/v1" (incoming /v1/models -> http://127.0.0.1:8001/v1/models)
+	UpstreamBaseURL string `yaml:"upstream-base-url,omitempty" json:"upstream-base-url,omitempty"`
+
 	// ExcludedModels lists model IDs or wildcard patterns that this API key is NOT allowed to access.
 	// Matching is case-insensitive. Supports '*' wildcard.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
@@ -285,6 +295,8 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		if entry.APIKey == "" {
 			continue
 		}
+
+		entry.UpstreamBaseURL = strings.TrimSpace(entry.UpstreamBaseURL)
 
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 
