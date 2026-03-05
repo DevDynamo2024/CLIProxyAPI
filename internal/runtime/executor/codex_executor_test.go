@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -119,5 +120,60 @@ func TestCodexExecuteFallsBackToCompactWhenStreamEndsEarly(t *testing.T) {
 	}
 	if calls["/responses/compact"] != 1 {
 		t.Fatalf("/responses/compact calls = %d, want 1", calls["/responses/compact"])
+	}
+}
+
+func TestCodexExecutorStripsToolsDeferLoadingBeforeUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var seenBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		mu.Lock()
+		seenBody = b
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.2", Payload: []byte(`{
+		"input":"hi",
+		"tools":{
+			"defer_loading":true,
+			"tool_choice":"auto",
+			"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object","properties":{}}}}]
+		}
+	}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]byte(nil), seenBody...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatalf("upstream body is empty")
+	}
+	if gjson.GetBytes(got, "tools.defer_loading").Exists() {
+		t.Fatalf("tools.defer_loading still exists: %s", string(got))
+	}
+	if gjson.GetBytes(got, "tools").Exists() && !gjson.GetBytes(got, "tools").IsArray() {
+		t.Fatalf("tools is not array after normalization: %s", gjson.GetBytes(got, "tools").Raw)
 	}
 }

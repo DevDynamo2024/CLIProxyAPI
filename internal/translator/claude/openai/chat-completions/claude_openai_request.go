@@ -63,6 +63,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out := fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID)
 
 	root := gjson.ParseBytes(rawJSON)
+	toolsRoot := root.Get("tools")
+	if toolsRoot.Exists() && toolsRoot.IsObject() {
+		if nested := toolsRoot.Get("tools"); nested.Exists() && nested.IsArray() {
+			toolsRoot = nested
+		}
+	}
+	toolChoiceRoot := root.Get("tool_choice")
+	if !toolChoiceRoot.Exists() {
+		toolChoiceRoot = root.Get("tools.tool_choice")
+	}
 
 	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
@@ -260,11 +270,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
-	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
-		hasAnthropicTools := false
+	toolNames := make(map[string]struct{})
+	hasAnthropicTools := false
+	if tools := toolsRoot; tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				function := tool.Get("function")
+			toolType := tool.Get("type").String()
+			function := tool.Get("function")
+			if toolType == "function" || function.Exists() {
+				if !function.Exists() {
+					function = tool
+				}
 				anthropicTool := `{"name":"","description":""}`
 				anthropicTool, _ = sjson.Set(anthropicTool, "name", function.Get("name").String())
 				anthropicTool, _ = sjson.Set(anthropicTool, "description", function.Get("description").String())
@@ -274,9 +289,29 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
 				} else if parameters := function.Get("parametersJsonSchema"); parameters.Exists() {
 					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
+				} else if schema := tool.Get("input_schema"); schema.Exists() {
+					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", schema.Raw)
 				}
 
 				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)
+				if name := strings.TrimSpace(function.Get("name").String()); name != "" {
+					toolNames[name] = struct{}{}
+				}
+				hasAnthropicTools = true
+			} else if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+				// Best-effort: some clients may send Claude-style tool objects through OpenAI-compatible payloads.
+				anthropicTool := `{"name":"","description":""}`
+				anthropicTool, _ = sjson.Set(anthropicTool, "name", name)
+				anthropicTool, _ = sjson.Set(anthropicTool, "description", tool.Get("description").String())
+				if schema := tool.Get("input_schema"); schema.Exists() {
+					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", schema.Raw)
+				} else if parameters := tool.Get("parameters"); parameters.Exists() {
+					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
+				} else if parameters := tool.Get("parametersJsonSchema"); parameters.Exists() {
+					anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", parameters.Raw)
+				}
+				out, _ = sjson.SetRaw(out, "tools.-1", anthropicTool)
+				toolNames[name] = struct{}{}
 				hasAnthropicTools = true
 			}
 			return true
@@ -288,9 +323,12 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tool choice mapping from OpenAI format to Claude Code format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+	if toolChoice := toolChoiceRoot; toolChoice.Exists() {
 		switch toolChoice.Type {
 		case gjson.String:
+			if !hasAnthropicTools {
+				break
+			}
 			choice := toolChoice.String()
 			switch choice {
 			case "none":
@@ -304,9 +342,16 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			// Specific tool choice mapping
 			if toolChoice.Get("type").String() == "function" {
 				functionName := toolChoice.Get("function.name").String()
-				toolChoiceJSON := `{"type":"tool","name":""}`
-				toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", functionName)
-				out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
+				if !hasAnthropicTools {
+					break
+				}
+				if functionName != "" {
+					if _, ok := toolNames[functionName]; ok {
+						toolChoiceJSON := `{"type":"tool","name":""}`
+						toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "name", functionName)
+						out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)
+					}
+				}
 			}
 		default:
 		}

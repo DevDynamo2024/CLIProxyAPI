@@ -123,6 +123,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = normalizeClaudeToolsForUpstream(body)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -287,6 +288,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = normalizeClaudeToolsForUpstream(body)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -473,6 +475,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = normalizeClaudeToolsForUpstream(body)
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
@@ -943,6 +946,59 @@ func isInvalidThinkingSignatureError(status int, body []byte) bool {
 	}
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "invalid `signature` in `thinking` block") || strings.Contains(msg, "invalid signature in thinking block")
+}
+
+func normalizeClaudeToolsForUpstream(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	out := payload
+	tools := gjson.GetBytes(out, "tools")
+	if !tools.Exists() {
+		return out
+	}
+
+	switch {
+	case tools.IsArray():
+		arr := tools.Array()
+		for i := 0; i < len(arr); i++ {
+			if !arr[i].IsObject() {
+				continue
+			}
+			if arr[i].Get("defer_loading").Exists() {
+				if updated, err := sjson.DeleteBytes(out, fmt.Sprintf("tools.%d.defer_loading", i)); err == nil {
+					out = updated
+				}
+			}
+		}
+		return out
+
+	case tools.IsObject():
+		// Claude expects tools to be an array. Some clients wrap it like:
+		//   "tools": { "defer_loading": true, "tool_choice": {...}, "tools": [ ... ] }
+		// Normalize these variants before forwarding upstream.
+		if updated, err := sjson.DeleteBytes(out, "tools.defer_loading"); err == nil {
+			out = updated
+		}
+		if !gjson.GetBytes(out, "tool_choice").Exists() {
+			if nestedChoice := gjson.GetBytes(out, "tools.tool_choice"); nestedChoice.Exists() {
+				if updated, err := sjson.SetRawBytes(out, "tool_choice", []byte(nestedChoice.Raw)); err == nil {
+					out = updated
+				}
+			}
+		}
+		if nested := gjson.GetBytes(out, "tools.tools"); nested.Exists() && nested.IsArray() {
+			if updated, err := sjson.SetRawBytes(out, "tools", []byte(nested.Raw)); err == nil {
+				out = updated
+			}
+			return normalizeClaudeToolsForUpstream(out)
+		}
+		return out
+
+	default:
+		return out
+	}
 }
 
 func applyClaudeToolPrefix(body []byte, prefix string) []byte {

@@ -136,3 +136,26 @@ func TestDecodeResponseBytesBestEffort_GzipWithoutHeader(t *testing.T) {
 		t.Fatalf("decoded = %q, want %q", string(got), string(want))
 	}
 }
+
+func TestNormalizeClaudeToolsForUpstream_UnwrapsToolsWrapperAndHoistsToolChoice(t *testing.T) {
+	in := []byte(`{
+  "tools": {
+    "defer_loading": true,
+    "tool_choice": {"type":"tool","name":"Bash"},
+    "tools": [
+      {"name":"Bash","description":"Run shell","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}
+    ]
+  }
+}`)
+
+	out := normalizeClaudeToolsForUpstream(in)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Bash" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "Bash")
+	}
+	if gjson.GetBytes(out, "tools.defer_loading").Exists() {
+		t.Fatalf("tools.defer_loading should be removed")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "Bash" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "Bash")
+	}
+}
