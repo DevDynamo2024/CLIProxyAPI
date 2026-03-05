@@ -187,8 +187,93 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		recordAPIResponseError(ctx, e.cfg, errScan)
 		return resp, errScan
 	}
+	logWithRequestID(ctx).Warn("codex executor: SSE stream ended before response.completed; attempting /responses/compact fallback")
+	if compactResp, compactErr := e.executeCompactFallback(ctx, auth, req, from, to, apiKey, baseURL, originalPayload, body, reporter); compactErr == nil {
+		return compactResp, nil
+	} else if status, ok := compactErr.(interface{ StatusCode() int }); ok && status != nil {
+		code := status.StatusCode()
+		if code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+			return resp, compactErr
+		}
+	} else if compactErr != nil {
+		return resp, compactErr
+	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+	recordAPIResponseError(ctx, e.cfg, err)
 	return resp, err
+}
+
+func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, from, to sdktranslator.Format, apiKey, baseURL string, originalPayload, streamBody []byte, reporter *usageReporter) (resp cliproxyexecutor.Response, err error) {
+	compactBody, err := sjson.DeleteBytes(streamBody, "stream")
+	if err != nil {
+		compactBody = streamBody
+	}
+
+	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	httpReq, err := e.cacheHelper(ctx, from, url, req, compactBody)
+	if err != nil {
+		return resp, err
+	}
+	applyCodexHeaders(httpReq, auth, apiKey, false)
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      compactBody,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+	}()
+
+	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(httpResp.Body)
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		logWithRequestID(ctx).Debugf("compact fallback request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		return resp, err
+	}
+
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	appendAPIResponseChunk(ctx, e.cfg, data)
+
+	wrapped := []byte(`{"type":"response.completed"}`)
+	wrapped, _ = sjson.SetRawBytes(wrapped, "response", data)
+
+	if detail, ok := parseCodexUsage(wrapped); ok && reporter != nil {
+		reporter.publish(ctx, detail)
+	}
+	if reporter != nil {
+		reporter.ensurePublished(ctx)
+	}
+
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, compactBody, wrapped, &param)
+	resp = cliproxyexecutor.Response{Payload: []byte(out)}
+	return resp, nil
 }
 
 func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

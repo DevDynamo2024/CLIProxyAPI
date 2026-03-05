@@ -36,6 +36,7 @@ __pycache__/
 
 # Documentation
 docs/*
+!docs/claude-code-lifecycle.md
 CLAUDE.md
 GEMINI.md
 

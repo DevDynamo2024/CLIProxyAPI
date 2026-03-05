@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,5 +61,63 @@ func TestCodexExecuteStopsAfterResponseCompleted(t *testing.T) {
 	}
 	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "response.completed" {
 		t.Fatalf("type = %q, want %q (payload=%s)", got, "response.completed", string(resp.Payload))
+	}
+}
+
+func TestCodexExecuteFallsBackToCompactWhenStreamEndsEarly(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	calls := map[string]int{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls[r.URL.Path]++
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/responses":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"type\":\"response.created\"}\n\n"))
+			return
+		case "/responses/compact":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"resp_compact","model":"gpt-5.2","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"stop_reason":"stop"}`))
+			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}))
+	defer srv.Close()
+
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.2", Payload: []byte(`{"input":"hi"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(resp.Payload, "type").String(); got != "response.completed" {
+		t.Fatalf("type = %q, want %q (payload=%s)", got, "response.completed", string(resp.Payload))
+	}
+	if got := gjson.GetBytes(resp.Payload, "response.id").String(); got != "resp_compact" {
+		t.Fatalf("response.id = %q, want %q (payload=%s)", got, "resp_compact", string(resp.Payload))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls["/responses"] != 1 {
+		t.Fatalf("/responses calls = %d, want 1", calls["/responses"])
+	}
+	if calls["/responses/compact"] != 1 {
+		t.Fatalf("/responses/compact calls = %d, want 1", calls["/responses/compact"])
 	}
 }
