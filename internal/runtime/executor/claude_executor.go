@@ -199,15 +199,16 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			break
 		}
 
-		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		raw, _ := io.ReadAll(httpResp.Body)
+		decoded := decodeResponseBytesBestEffort(raw, httpResp.Header.Get("Content-Encoding"))
+		appendAPIResponseChunk(ctx, e.cfg, decoded)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), decoded))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 
 		// Retry once by stripping thinking blocks from replayed history when Anthropic rejects signatures.
-		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, decoded) {
 			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 			if !bytes.Equal(sanitized, bodyForTranslation) {
 				bodyForTranslation = sanitized
@@ -215,7 +216,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(decoded)}
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -360,14 +361,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			break
 		}
 
-		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		raw, _ := io.ReadAll(httpResp.Body)
+		decoded := decodeResponseBytesBestEffort(raw, httpResp.Header.Get("Content-Encoding"))
+		appendAPIResponseChunk(ctx, e.cfg, decoded)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), decoded))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 
-		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, decoded) {
 			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 			if !bytes.Equal(sanitized, bodyForTranslation) {
 				bodyForTranslation = sanitized
@@ -375,7 +377,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(decoded)}
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -516,12 +518,13 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
+		raw, _ := io.ReadAll(resp.Body)
+		decoded := decodeResponseBytesBestEffort(raw, resp.Header.Get("Content-Encoding"))
+		appendAPIResponseChunk(ctx, e.cfg, decoded)
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
+		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(decoded)}
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -631,6 +634,67 @@ func (c *compositeReadCloser) Close() error {
 		}
 	}
 	return firstErr
+}
+
+func gunzipBytes(data []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
+	return io.ReadAll(reader)
+}
+
+func decodeResponseBytes(data []byte, contentEncoding string) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	if strings.TrimSpace(contentEncoding) == "" {
+		return data, nil
+	}
+	encodings := strings.Split(contentEncoding, ",")
+	for _, raw := range encodings {
+		encoding := strings.TrimSpace(strings.ToLower(raw))
+		switch encoding {
+		case "", "identity":
+			continue
+		case "gzip":
+			return gunzipBytes(data)
+		case "deflate":
+			reader := flate.NewReader(bytes.NewReader(data))
+			defer func() { _ = reader.Close() }()
+			return io.ReadAll(reader)
+		case "br":
+			return io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
+		case "zstd":
+			decoder, err := zstd.NewReader(bytes.NewReader(data))
+			if err != nil {
+				return nil, err
+			}
+			defer func() { decoder.Close() }()
+			return io.ReadAll(decoder)
+		default:
+			continue
+		}
+	}
+	return data, nil
+}
+
+func decodeResponseBytesBestEffort(data []byte, contentEncoding string) []byte {
+	decoded, err := decodeResponseBytes(data, contentEncoding)
+	if err == nil && len(decoded) > 0 {
+		data = decoded
+	}
+
+	// Claude (and some gateways) can return gzip-compressed bodies without Content-Encoding.
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		if gunz, errGz := gunzipBytes(data); errGz == nil && len(gunz) > 0 {
+			return gunz
+		}
+	}
+	return data
 }
 
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {

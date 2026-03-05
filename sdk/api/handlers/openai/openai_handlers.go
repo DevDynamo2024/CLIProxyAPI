@@ -108,6 +108,8 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	rawJSON = normalizeOpenAIToolsPayload(rawJSON)
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	stream := streamResult.Type == gjson.True
@@ -162,6 +164,8 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 		})
 		return
 	}
+
+	rawJSON = normalizeOpenAIToolsPayload(rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")

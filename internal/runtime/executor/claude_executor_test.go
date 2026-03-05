@@ -2,6 +2,8 @@ package executor
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
 	"net/http"
 	"testing"
 
@@ -96,5 +98,41 @@ func TestApplyClaudeHeaders_EnvForcesXAPIKeyWhenUsingAPIKey(t *testing.T) {
 	}
 	if got := req.Header.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization = %q, want empty", got)
+	}
+}
+
+func TestDecodeResponseBytesBestEffort_GzipWithHeader(t *testing.T) {
+	want := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"boom"}}`)
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(want); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	got := decodeResponseBytesBestEffort(buf.Bytes(), "gzip")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %q, want %q", string(got), string(want))
+	}
+}
+
+func TestDecodeResponseBytesBestEffort_GzipWithoutHeader(t *testing.T) {
+	want := []byte(`{"error":{"message":"compressed"}}`)
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := io.Copy(zw, bytes.NewReader(want)); err != nil {
+		t.Fatalf("gzip copy: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	got := decodeResponseBytesBestEffort(buf.Bytes(), "")
+	if !bytes.Equal(got, want) {
+		t.Fatalf("decoded = %q, want %q", string(got), string(want))
 	}
 }
