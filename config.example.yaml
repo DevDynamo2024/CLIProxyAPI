@@ -60,23 +60,23 @@ api-key-policies:
       rules:
         - enabled: true
           from-model: "claude-opus-4-6*"
-          target-model: "gpt-5.2(high)"
+          target-model: "gpt-5.4(high)"
           target-percent: 50
           sticky-window-seconds: 3600
         - enabled: true
           from-model: "claude-sonnet-4-6*"
-          target-model: "gpt-5.3-codex(high)"
+          target-model: "gpt-5.4(high)"
           target-percent: 50
           sticky-window-seconds: 3600
     failover:
       claude:
         enabled: true
-        target-model: "gpt-5.2(high)" # default fallback when no rules match
+        target-model: "gpt-5.4(high)" # default fallback when no rules match
         rules:
           - from-model: "claude-opus-4-6*"
-            target-model: "gpt-5.2(high)"
+            target-model: "gpt-5.4(high)"
           - from-model: "claude-sonnet-4-6*"
-            target-model: "gpt-5.3-codex(high)"
+            target-model: "gpt-5.4(high)"
     allow-claude-opus-4-6: true
     daily-limits:
       claude-opus-4-6: 10

@@ -87,7 +87,7 @@ type ProviderFailoverPolicy struct {
 	// Enabled toggles failover behaviour for the provider.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 
-	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.2(high)").
+	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.4(high)").
 	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
 
 	// Rules optionally override the target model based on the requested model.
@@ -223,7 +223,7 @@ func (p *APIKeyPolicy) ClaudeFailoverTargetModel() (string, bool) {
 	}
 	target := strings.TrimSpace(p.Failover.Claude.TargetModel)
 	if target == "" {
-		target = "gpt-5.2(high)"
+		target = "gpt-5.4(high)"
 	}
 	return target, true
 }

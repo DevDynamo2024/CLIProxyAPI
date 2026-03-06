@@ -154,7 +154,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverEnabled(t *testing.T) {
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-model"}})
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
@@ -171,7 +171,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverEnabled(t *testing.T) {
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 			},
 		},
 	})
@@ -205,7 +205,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverModelRule(t *testing.T) {
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-sonnet-4-6"}})
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.3-codex"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
@@ -222,9 +222,9 @@ func TestExecuteWithAuthManager_ClaudeFailoverModelRule(t *testing.T) {
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 				Rules: []internalconfig.ModelFailoverRule{
-					{FromModel: "claude-sonnet-4-6*", TargetModel: "gpt-5.3-codex(high)"},
+					{FromModel: "claude-sonnet-4-6*", TargetModel: "gpt-5.4(high)"},
 				},
 			},
 		},
@@ -239,8 +239,8 @@ func TestExecuteWithAuthManager_ClaudeFailoverModelRule(t *testing.T) {
 	if string(resp) != "ok" {
 		t.Fatalf("expected ok, got %q", string(resp))
 	}
-	if gotModel != "gpt-5.3-codex(high)" {
-		t.Fatalf("expected failover model %q, got %q", "gpt-5.3-codex(high)", gotModel)
+	if gotModel != "gpt-5.4(high)" {
+		t.Fatalf("expected failover model %q, got %q", "gpt-5.4(high)", gotModel)
 	}
 }
 
@@ -260,7 +260,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverDisabled(t *testing.T) {
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-model"}})
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
@@ -299,7 +299,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T) {
 		t.Fatalf("manager.Register(codex): %v", err)
 	}
 
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
 	})
@@ -315,7 +315,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T) {
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 			},
 		},
 	})
@@ -347,7 +347,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverAuthUnavailable(t *testing.T) {
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-opus-4-6"}})
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
@@ -364,7 +364,7 @@ func TestExecuteWithAuthManager_ClaudeFailoverAuthUnavailable(t *testing.T) {
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 			},
 		},
 	})
@@ -396,7 +396,7 @@ func TestExecuteStreamWithAuthManager_ClaudeFailoverBeforeFirstByte(t *testing.T
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-model"}})
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
@@ -413,7 +413,7 @@ func TestExecuteStreamWithAuthManager_ClaudeFailoverBeforeFirstByte(t *testing.T
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 			},
 		},
 	})
@@ -451,7 +451,7 @@ func TestExecuteStreamWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T
 		t.Fatalf("manager.Register(codex): %v", err)
 	}
 
-	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.2"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
 	t.Cleanup(func() {
 		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
 	})
@@ -467,7 +467,7 @@ func TestExecuteStreamWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T
 		Failover: internalconfig.APIKeyFailoverPolicy{
 			Claude: internalconfig.ProviderFailoverPolicy{
 				Enabled:     true,
-				TargetModel: "gpt-5.2(high)",
+				TargetModel: "gpt-5.4(high)",
 			},
 		},
 	})

@@ -15,7 +15,7 @@ func TestAPIKeyPolicy_RoutedModelFor_TargetPercent100(t *testing.T) {
 				{
 					Enabled:       boolPtr(true),
 					FromModel:     "claude-opus-4-6*",
-					TargetModel:   "gpt-5.2(high)",
+					TargetModel:   "gpt-5.4(high)",
 					TargetPercent: 100,
 				},
 			},
@@ -23,7 +23,7 @@ func TestAPIKeyPolicy_RoutedModelFor_TargetPercent100(t *testing.T) {
 	}
 
 	target, decision := p.RoutedModelFor("k1", "claude-opus-4-6", time.Unix(0, 0))
-	if target != "gpt-5.2(high)" {
+	if target != "gpt-5.4(high)" {
 		t.Fatalf("expected target model, got %q", target)
 	}
 	if decision == nil {
@@ -45,7 +45,7 @@ func TestAPIKeyPolicy_RoutedModelFor_TargetPercent0_DisablesRouting(t *testing.T
 				{
 					Enabled:       boolPtr(true),
 					FromModel:     "claude-opus-4-6*",
-					TargetModel:   "gpt-5.2(high)",
+					TargetModel:   "gpt-5.4(high)",
 					TargetPercent: 0,
 				},
 			},
@@ -65,7 +65,7 @@ func TestAPIKeyPolicy_RoutedModelFor_TargetPercent50_StableWithinWindowAndAltern
 			Rules: []ModelRoutingRule{
 				{
 					FromModel:           "claude-opus-4-6*",
-					TargetModel:         "gpt-5.2(high)",
+					TargetModel:         "gpt-5.4(high)",
 					TargetPercent:       50,
 					StickyWindowSeconds: 3600,
 				},
@@ -99,7 +99,7 @@ func TestAPIKeyPolicy_RoutedModelFor_TargetPercent30_HitsExactRatioPerPeriod(t *
 			Rules: []ModelRoutingRule{
 				{
 					FromModel:           "claude-opus-4-6*",
-					TargetModel:         "gpt-5.2(high)",
+					TargetModel:         "gpt-5.4(high)",
 					TargetPercent:       30,
 					StickyWindowSeconds: 3600,
 				},
@@ -127,12 +127,12 @@ func TestAPIKeyPolicy_RoutedModelFor_RulePriority(t *testing.T) {
 			Rules: []ModelRoutingRule{
 				{
 					FromModel:     "claude-opus-4-6*",
-					TargetModel:   "gpt-5.2(high)",
+					TargetModel:   "gpt-5.4(high)",
 					TargetPercent: 0, // first match disables routing
 				},
 				{
 					FromModel:     "claude-*",
-					TargetModel:   "gpt-5.3-codex(high)",
+					TargetModel:   "gpt-5.4(high)",
 					TargetPercent: 100,
 				},
 			},
