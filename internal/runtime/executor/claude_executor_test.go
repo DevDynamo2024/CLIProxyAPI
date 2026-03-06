@@ -41,6 +41,18 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
 	}
 }
 
+func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
+	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.tool_name").String(); got != "proxy_beta" {
+		t.Fatalf("messages.0.content.0.tool_name = %q, want %q", got, "proxy_beta")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.tool_name").String(); got != "proxy_gamma" {
+		t.Fatalf("messages.0.content.1.tool_name = %q, want %q", got, "proxy_gamma")
+	}
+}
+
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
@@ -50,6 +62,18 @@ func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 	}
 	if got := gjson.GetBytes(out, "content.1.name").String(); got != "bravo" {
 		t.Fatalf("content.1.name = %q, want %q", got, "bravo")
+	}
+}
+
+func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
+	input := []byte(`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`)
+	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
+
+	if got := gjson.GetBytes(out, "content.0.tool_name").String(); got != "alpha" {
+		t.Fatalf("content.0.tool_name = %q, want %q", got, "alpha")
+	}
+	if got := gjson.GetBytes(out, "content.1.tool_name").String(); got != "bravo" {
+		t.Fatalf("content.1.tool_name = %q, want %q", got, "bravo")
 	}
 }
 
@@ -63,6 +87,19 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 	}
 	if got := gjson.GetBytes(payload, "content_block.name").String(); got != "alpha" {
 		t.Fatalf("content_block.name = %q, want %q", got, "alpha")
+	}
+}
+
+func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
+	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_reference","tool_name":"proxy_beta"},"index":0}`)
+	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
+
+	payload := bytes.TrimSpace(out)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if got := gjson.GetBytes(payload, "content_block.tool_name").String(); got != "beta" {
+		t.Fatalf("content_block.tool_name = %q, want %q", got, "beta")
 	}
 }
 
@@ -101,25 +138,7 @@ func TestApplyClaudeHeaders_EnvForcesXAPIKeyWhenUsingAPIKey(t *testing.T) {
 	}
 }
 
-func TestDecodeResponseBytesBestEffort_GzipWithHeader(t *testing.T) {
-	want := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"boom"}}`)
-
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if _, err := zw.Write(want); err != nil {
-		t.Fatalf("gzip write: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("gzip close: %v", err)
-	}
-
-	got := decodeResponseBytesBestEffort(buf.Bytes(), "gzip")
-	if !bytes.Equal(got, want) {
-		t.Fatalf("decoded = %q, want %q", string(got), string(want))
-	}
-}
-
-func TestDecodeResponseBytesBestEffort_GzipWithoutHeader(t *testing.T) {
+func TestDecodeResponseBody_MagicByteGzipNoHeader(t *testing.T) {
 	want := []byte(`{"error":{"message":"compressed"}}`)
 
 	var buf bytes.Buffer
@@ -131,7 +150,17 @@ func TestDecodeResponseBytesBestEffort_GzipWithoutHeader(t *testing.T) {
 		t.Fatalf("gzip close: %v", err)
 	}
 
-	got := decodeResponseBytesBestEffort(buf.Bytes(), "")
+	decoded, err := decodeResponseBody(io.NopCloser(bytes.NewReader(buf.Bytes())), "")
+	if err != nil {
+		t.Fatalf("decodeResponseBody error: %v", err)
+	}
+	got, err := io.ReadAll(decoded)
+	if err != nil {
+		t.Fatalf("read decoded body: %v", err)
+	}
+	if err := decoded.Close(); err != nil {
+		t.Fatalf("close decoded body: %v", err)
+	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("decoded = %q, want %q", string(got), string(want))
 	}

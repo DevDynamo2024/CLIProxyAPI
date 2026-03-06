@@ -36,7 +36,8 @@ type ClaudeExecutor struct {
 	cfg *config.Config
 }
 
-const claudeToolPrefix = "proxy_"
+// claudeToolPrefix is empty to match real Claude Code behavior (no tool name prefix).
+const claudeToolPrefix = ""
 const anthropicBaseURLEnv = "ANTHROPIC_BASE_URL"
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
@@ -200,16 +201,28 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			break
 		}
 
-		raw, _ := io.ReadAll(httpResp.Body)
-		decoded := decodeResponseBytesBestEffort(raw, httpResp.Header.Get("Content-Encoding"))
-		appendAPIResponseChunk(ctx, e.cfg, decoded)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), decoded))
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 
 		// Retry once by stripping thinking blocks from replayed history when Anthropic rejects signatures.
-		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, decoded) {
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
 			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 			if !bytes.Equal(sanitized, bodyForTranslation) {
 				bodyForTranslation = sanitized
@@ -217,7 +230,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 			}
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(decoded)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -363,15 +376,27 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			break
 		}
 
-		raw, _ := io.ReadAll(httpResp.Body)
-		decoded := decodeResponseBytesBestEffort(raw, httpResp.Header.Get("Content-Encoding"))
-		appendAPIResponseChunk(ctx, e.cfg, decoded)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), decoded))
-		if errClose := httpResp.Body.Close(); errClose != nil {
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
 
-		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, decoded) {
+		if attempt == 0 && isInvalidThinkingSignatureError(httpResp.StatusCode, b) {
 			sanitized := stripThinkingBlocksFromClaudePayload(bodyForTranslation)
 			if !bytes.Equal(sanitized, bodyForTranslation) {
 				bodyForTranslation = sanitized
@@ -379,7 +404,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
-		err = statusErr{code: httpResp.StatusCode, msg: string(decoded)}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -521,13 +546,25 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
-		decoded := decodeResponseBytesBestEffort(raw, resp.Header.Get("Content-Encoding"))
-		appendAPIResponseChunk(ctx, e.cfg, decoded)
-		if errClose := resp.Body.Close(); errClose != nil {
+		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
+		}
+		b, readErr := io.ReadAll(errBody)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
+			logWithRequestID(ctx).Warn(msg)
+			b = []byte(msg)
+		}
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(decoded)}
+		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(b)}
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
 	if err != nil {
@@ -639,65 +676,15 @@ func (c *compositeReadCloser) Close() error {
 	return firstErr
 }
 
-func gunzipBytes(data []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = reader.Close()
-	}()
-	return io.ReadAll(reader)
+// peekableBody wraps a bufio.Reader around the original ReadCloser so magic bytes
+// can be inspected without consuming them from the stream.
+type peekableBody struct {
+	*bufio.Reader
+	closer io.Closer
 }
 
-func decodeResponseBytes(data []byte, contentEncoding string) ([]byte, error) {
-	if len(data) == 0 {
-		return data, nil
-	}
-	if strings.TrimSpace(contentEncoding) == "" {
-		return data, nil
-	}
-	encodings := strings.Split(contentEncoding, ",")
-	for _, raw := range encodings {
-		encoding := strings.TrimSpace(strings.ToLower(raw))
-		switch encoding {
-		case "", "identity":
-			continue
-		case "gzip":
-			return gunzipBytes(data)
-		case "deflate":
-			reader := flate.NewReader(bytes.NewReader(data))
-			defer func() { _ = reader.Close() }()
-			return io.ReadAll(reader)
-		case "br":
-			return io.ReadAll(brotli.NewReader(bytes.NewReader(data)))
-		case "zstd":
-			decoder, err := zstd.NewReader(bytes.NewReader(data))
-			if err != nil {
-				return nil, err
-			}
-			defer func() { decoder.Close() }()
-			return io.ReadAll(decoder)
-		default:
-			continue
-		}
-	}
-	return data, nil
-}
-
-func decodeResponseBytesBestEffort(data []byte, contentEncoding string) []byte {
-	decoded, err := decodeResponseBytes(data, contentEncoding)
-	if err == nil && len(decoded) > 0 {
-		data = decoded
-	}
-
-	// Claude (and some gateways) can return gzip-compressed bodies without Content-Encoding.
-	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
-		if gunz, errGz := gunzipBytes(data); errGz == nil && len(gunz) > 0 {
-			return gunz
-		}
-	}
-	return data
+func (p *peekableBody) Close() error {
+	return p.closer.Close()
 }
 
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
@@ -705,7 +692,41 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 		return nil, fmt.Errorf("response body is nil")
 	}
 	if contentEncoding == "" {
-		return body, nil
+		// Handle misbehaving upstreams that compress without setting Content-Encoding.
+		// Only gzip and zstd have reliable magic bytes; brotli/deflate are left untouched.
+		pb := &peekableBody{Reader: bufio.NewReader(body), closer: body}
+		magic, peekErr := pb.Peek(4)
+		if peekErr == nil || (peekErr == io.EOF && len(magic) >= 2) {
+			switch {
+			case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+				gzipReader, gzErr := gzip.NewReader(pb)
+				if gzErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte gzip: failed to create reader: %w", gzErr)
+				}
+				return &compositeReadCloser{
+					Reader: gzipReader,
+					closers: []func() error{
+						gzipReader.Close,
+						pb.Close,
+					},
+				}, nil
+			case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
+				decoder, zdErr := zstd.NewReader(pb)
+				if zdErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte zstd: failed to create reader: %w", zdErr)
+				}
+				return &compositeReadCloser{
+					Reader: decoder,
+					closers: []func() error{
+						func() error { decoder.Close(); return nil },
+						pb.Close,
+					},
+				}, nil
+			}
+		}
+		return pb, nil
 	}
 	encodings := strings.Split(contentEncoding, ",")
 	for _, raw := range encodings {
@@ -1006,11 +1027,17 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 		return body
 	}
 
+	builtinTools := map[string]bool{}
+	for _, name := range []string{"web_search", "code_execution", "text_editor", "computer"} {
+		builtinTools[name] = true
+	}
+
 	if tools := gjson.GetBytes(body, "tools"); tools.Exists() && tools.IsArray() {
 		tools.ForEach(func(index, tool gjson.Result) bool {
-			// Skip built-in tools (web_search, code_execution, etc.) which have
-			// a "type" field and require their name to remain unchanged.
 			if tool.Get("type").Exists() && tool.Get("type").String() != "" {
+				if n := tool.Get("name").String(); n != "" {
+					builtinTools[n] = true
+				}
 				return true
 			}
 			name := tool.Get("name").String()
@@ -1025,7 +1052,7 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 
 	if gjson.GetBytes(body, "tool_choice.type").String() == "tool" {
 		name := gjson.GetBytes(body, "tool_choice.name").String()
-		if name != "" && !strings.HasPrefix(name, prefix) {
+		if name != "" && !strings.HasPrefix(name, prefix) && !builtinTools[name] {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", prefix+name)
 		}
 	}
@@ -1037,15 +1064,37 @@ func applyClaudeToolPrefix(body []byte, prefix string) []byte {
 				return true
 			}
 			content.ForEach(func(contentIndex, part gjson.Result) bool {
-				if part.Get("type").String() != "tool_use" {
-					return true
+				partType := part.Get("type").String()
+				switch partType {
+				case "tool_use":
+					name := part.Get("name").String()
+					if name == "" || strings.HasPrefix(name, prefix) || builtinTools[name] {
+						return true
+					}
+					path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+					body, _ = sjson.SetBytes(body, path, prefix+name)
+				case "tool_reference":
+					toolName := part.Get("tool_name").String()
+					if toolName == "" || strings.HasPrefix(toolName, prefix) || builtinTools[toolName] {
+						return true
+					}
+					path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+					body, _ = sjson.SetBytes(body, path, prefix+toolName)
+				case "tool_result":
+					nestedContent := part.Get("content")
+					if nestedContent.Exists() && nestedContent.IsArray() {
+						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+							if nestedPart.Get("type").String() == "tool_reference" {
+								nestedToolName := nestedPart.Get("tool_name").String()
+								if nestedToolName != "" && !strings.HasPrefix(nestedToolName, prefix) && !builtinTools[nestedToolName] {
+									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
+									body, _ = sjson.SetBytes(body, nestedPath, prefix+nestedToolName)
+								}
+							}
+							return true
+						})
+					}
 				}
-				name := part.Get("name").String()
-				if name == "" || strings.HasPrefix(name, prefix) {
-					return true
-				}
-				path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
-				body, _ = sjson.SetBytes(body, path, prefix+name)
 				return true
 			})
 			return true
@@ -1064,15 +1113,37 @@ func stripClaudeToolPrefixFromResponse(body []byte, prefix string) []byte {
 		return body
 	}
 	content.ForEach(func(index, part gjson.Result) bool {
-		if part.Get("type").String() != "tool_use" {
-			return true
+		partType := part.Get("type").String()
+		switch partType {
+		case "tool_use":
+			name := part.Get("name").String()
+			if !strings.HasPrefix(name, prefix) {
+				return true
+			}
+			path := fmt.Sprintf("content.%d.name", index.Int())
+			body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(name, prefix))
+		case "tool_reference":
+			toolName := part.Get("tool_name").String()
+			if !strings.HasPrefix(toolName, prefix) {
+				return true
+			}
+			path := fmt.Sprintf("content.%d.tool_name", index.Int())
+			body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(toolName, prefix))
+		case "tool_result":
+			nestedContent := part.Get("content")
+			if nestedContent.Exists() && nestedContent.IsArray() {
+				nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
+					if nestedPart.Get("type").String() == "tool_reference" {
+						nestedToolName := nestedPart.Get("tool_name").String()
+						if strings.HasPrefix(nestedToolName, prefix) {
+							nestedPath := fmt.Sprintf("content.%d.content.%d.tool_name", index.Int(), nestedIndex.Int())
+							body, _ = sjson.SetBytes(body, nestedPath, strings.TrimPrefix(nestedToolName, prefix))
+						}
+					}
+					return true
+				})
+			}
 		}
-		name := part.Get("name").String()
-		if !strings.HasPrefix(name, prefix) {
-			return true
-		}
-		path := fmt.Sprintf("content.%d.name", index.Int())
-		body, _ = sjson.SetBytes(body, path, strings.TrimPrefix(name, prefix))
 		return true
 	})
 	return body
@@ -1087,15 +1158,33 @@ func stripClaudeToolPrefixFromStreamLine(line []byte, prefix string) []byte {
 		return line
 	}
 	contentBlock := gjson.GetBytes(payload, "content_block")
-	if !contentBlock.Exists() || contentBlock.Get("type").String() != "tool_use" {
+	if !contentBlock.Exists() {
 		return line
 	}
-	name := contentBlock.Get("name").String()
-	if !strings.HasPrefix(name, prefix) {
-		return line
-	}
-	updated, err := sjson.SetBytes(payload, "content_block.name", strings.TrimPrefix(name, prefix))
-	if err != nil {
+
+	blockType := contentBlock.Get("type").String()
+	var updated []byte
+	var err error
+	switch blockType {
+	case "tool_use":
+		name := contentBlock.Get("name").String()
+		if !strings.HasPrefix(name, prefix) {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.name", strings.TrimPrefix(name, prefix))
+		if err != nil {
+			return line
+		}
+	case "tool_reference":
+		toolName := contentBlock.Get("tool_name").String()
+		if !strings.HasPrefix(toolName, prefix) {
+			return line
+		}
+		updated, err = sjson.SetBytes(payload, "content_block.tool_name", strings.TrimPrefix(toolName, prefix))
+		if err != nil {
+			return line
+		}
+	default:
 		return line
 	}
 

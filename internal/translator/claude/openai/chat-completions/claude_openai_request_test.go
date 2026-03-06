@@ -67,3 +67,19 @@ func TestConvertOpenAIRequestToClaude_DropsSpecificToolChoiceWhenToolMissing(t *
 	}
 }
 
+func TestConvertOpenAIRequestToClaude_MapsLegacyFunctionsAndFunctionCall(t *testing.T) {
+	in := []byte(`{
+  "model":"claude-opus-4-6",
+  "messages":[{"role":"user","content":"check"}],
+  "functions":[{"name":"Read","description":"Read file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}],
+  "function_call":{"name":"Read"}
+}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-opus-4-6", in, false)
+	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "Read" {
+		t.Fatalf("tools.0.name = %q, want %q", got, "Read")
+	}
+	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "Read" {
+		t.Fatalf("tool_choice.name = %q, want %q", got, "Read")
+	}
+}
