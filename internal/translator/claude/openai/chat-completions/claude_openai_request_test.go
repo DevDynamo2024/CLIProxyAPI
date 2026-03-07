@@ -83,3 +83,40 @@ func TestConvertOpenAIRequestToClaude_MapsLegacyFunctionsAndFunctionCall(t *test
 		t.Fatalf("tool_choice.name = %q, want %q", got, "Read")
 	}
 }
+
+func TestConvertOpenAIRequestToClaude_UsesAdaptiveThinkingForClaude46(t *testing.T) {
+	in := []byte(`{
+  "model":"claude-opus-4-6",
+  "messages":[{"role":"user","content":"check"}],
+  "reasoning_effort":"xhigh"
+}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-opus-4-6", in, false)
+	if got := gjson.GetBytes(out, "thinking.type").String(); got != "adaptive" {
+		t.Fatalf("thinking.type = %q, want %q", got, "adaptive")
+	}
+	if got := gjson.GetBytes(out, "output_config.effort").String(); got != "max" {
+		t.Fatalf("output_config.effort = %q, want %q", got, "max")
+	}
+	if gjson.GetBytes(out, "thinking.budget_tokens").Exists() {
+		t.Fatalf("thinking.budget_tokens should be cleared for adaptive thinking")
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_MapsFileContentToDocument(t *testing.T) {
+	in := []byte(`{
+  "model":"claude-opus-4-6",
+  "messages":[{"role":"user","content":[{"type":"file","file":{"file_data":"data:text/plain;base64,SGVsbG8="}}]}]
+}`)
+
+	out := ConvertOpenAIRequestToClaude("claude-opus-4-6", in, false)
+	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "document" {
+		t.Fatalf("messages.0.content.0.type = %q, want %q", got, "document")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.source.media_type").String(); got != "text/plain" {
+		t.Fatalf("messages.0.content.0.source.media_type = %q, want %q", got, "text/plain")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.source.data").String(); got != "SGVsbG8=" {
+		t.Fatalf("messages.0.content.0.source.data = %q, want %q", got, "SGVsbG8=")
+	}
+}

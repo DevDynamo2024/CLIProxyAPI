@@ -128,7 +128,7 @@ func TestApplyClaudeHeaders_EnvForcesXAPIKeyWhenUsingAPIKey(t *testing.T) {
 			"api_key": "sk-ant-test",
 		},
 	}
-	applyClaudeHeaders(req, auth, "sk-ant-test", false, nil)
+	applyClaudeHeaders(req, auth, "sk-ant-test", false, nil, nil)
 
 	if got := req.Header.Get("x-api-key"); got != "sk-ant-test" {
 		t.Fatalf("x-api-key = %q, want %q", got, "sk-ant-test")
@@ -186,5 +186,90 @@ func TestNormalizeClaudeToolsForUpstream_UnwrapsToolsWrapperAndHoistsToolChoice(
 	}
 	if got := gjson.GetBytes(out, "tool_choice.name").String(); got != "Bash" {
 		t.Fatalf("tool_choice.name = %q, want %q", got, "Bash")
+	}
+}
+
+func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	got := gjson.GetBytes(out, "messages.0.content.0.content").String()
+	if got != "plain string result" {
+		t.Fatalf("string content should remain unchanged = %q", got)
+	}
+}
+
+func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
+	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`)
+	out := applyClaudeToolPrefix(input, "proxy_")
+	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
+	if got != "web_search" {
+		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
+	}
+}
+
+func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
+	payload := []byte(`{
+		"tools": [{"name":"t1","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]
+	}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if got := gjson.GetBytes(out, "tools.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("tools.0.cache_control.ttl = %q, want %q", got, "1h")
+	}
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	}
+}
+
+func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
+	payload := []byte(`{
+		"tools": [
+			{"name":"t1","cache_control":{"type":"ephemeral"}},
+			{"name":"t2","cache_control":{"type":"ephemeral"}}
+		],
+		"system": [{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}],
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}
+		]
+	}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
+	}
+	if !gjson.GetBytes(out, "tools.1.cache_control").Exists() {
+		t.Fatalf("tools.1.cache_control (last tool) should be preserved")
+	}
+	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
+		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
+	}
+}
+
+func TestApplyClaudeHeaders_StreamForcesIdentityEncoding(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key": "sk-ant-test",
+		},
+	}
+	applyClaudeHeaders(req, auth, "sk-ant-test", true, nil, nil)
+
+	if got := req.Header.Get("Accept-Encoding"); got != "identity" {
+		t.Fatalf("Accept-Encoding = %q, want %q", got, "identity")
+	}
+	if got := req.Header.Get("User-Agent"); got == "" {
+		t.Fatalf("User-Agent should be populated")
 	}
 }

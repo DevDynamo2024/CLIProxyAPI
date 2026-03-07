@@ -6,10 +6,16 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -146,6 +152,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body = ensureCacheControl(body)
 	}
 
+	body = enforceCacheControlLimit(body, 4)
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -172,7 +181,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if errReq != nil {
 			return resp, errReq
 		}
-		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+		applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
 		var authID, authLabel, authType, authValue string
 		if auth != nil {
 			authID = auth.ID
@@ -323,6 +332,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		body = ensureCacheControl(body)
 	}
 
+	body = enforceCacheControlLimit(body, 4)
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -347,7 +359,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errReq != nil {
 			return nil, errReq
 		}
-		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas)
+		applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
 		var authID, authLabel, authType, authValue string
 		if auth != nil {
 			authID = auth.ID
@@ -506,6 +518,9 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		body = checkSystemInstructions(body)
 	}
 
+	body = enforceCacheControlLimit(body, 4)
+	body = normalizeCacheControlTTL(body)
+
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -519,7 +534,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -654,8 +669,292 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	if toolChoiceType == "any" || toolChoiceType == "tool" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
+		body, _ = sjson.DeleteBytes(body, "output_config.effort")
+		if oc := gjson.GetBytes(body, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "output_config")
+		}
 	}
 	return body
+}
+
+func parsePayloadObject(payload []byte) (map[string]any, bool) {
+	if len(payload) == 0 {
+		return nil, false
+	}
+	var root map[string]any
+	if err := json.Unmarshal(payload, &root); err != nil {
+		return nil, false
+	}
+	return root, true
+}
+
+func marshalPayloadObject(original []byte, root map[string]any) []byte {
+	if root == nil {
+		return original
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return original
+	}
+	return out
+}
+
+func asObject(v any) (map[string]any, bool) {
+	obj, ok := v.(map[string]any)
+	return obj, ok
+}
+
+func asArray(v any) ([]any, bool) {
+	arr, ok := v.([]any)
+	return arr, ok
+}
+
+func countCacheControlsMap(root map[string]any) int {
+	count := 0
+
+	if system, ok := asArray(root["system"]); ok {
+		for _, item := range system {
+			if obj, ok := asObject(item); ok {
+				if _, exists := obj["cache_control"]; exists {
+					count++
+				}
+			}
+		}
+	}
+
+	if tools, ok := asArray(root["tools"]); ok {
+		for _, item := range tools {
+			if obj, ok := asObject(item); ok {
+				if _, exists := obj["cache_control"]; exists {
+					count++
+				}
+			}
+		}
+	}
+
+	if messages, ok := asArray(root["messages"]); ok {
+		for _, msg := range messages {
+			msgObj, ok := asObject(msg)
+			if !ok {
+				continue
+			}
+			content, ok := asArray(msgObj["content"])
+			if !ok {
+				continue
+			}
+			for _, item := range content {
+				if obj, ok := asObject(item); ok {
+					if _, exists := obj["cache_control"]; exists {
+						count++
+					}
+				}
+			}
+		}
+	}
+
+	return count
+}
+
+func normalizeTTLForBlock(obj map[string]any, seen5m *bool) {
+	ccRaw, exists := obj["cache_control"]
+	if !exists {
+		return
+	}
+	cc, ok := asObject(ccRaw)
+	if !ok {
+		*seen5m = true
+		return
+	}
+	ttlRaw, ttlExists := cc["ttl"]
+	ttl, ttlIsString := ttlRaw.(string)
+	if !ttlExists || !ttlIsString || ttl != "1h" {
+		*seen5m = true
+		return
+	}
+	if *seen5m {
+		delete(cc, "ttl")
+	}
+}
+
+func findLastCacheControlIndex(arr []any) int {
+	last := -1
+	for idx, item := range arr {
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			last = idx
+		}
+	}
+	return last
+}
+
+func stripCacheControlExceptIndex(arr []any, preserveIdx int, excess *int) {
+	for idx, item := range arr {
+		if *excess <= 0 {
+			return
+		}
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists && idx != preserveIdx {
+			delete(obj, "cache_control")
+			*excess--
+		}
+	}
+}
+
+func stripAllCacheControl(arr []any, excess *int) {
+	for _, item := range arr {
+		if *excess <= 0 {
+			return
+		}
+		obj, ok := asObject(item)
+		if !ok {
+			continue
+		}
+		if _, exists := obj["cache_control"]; exists {
+			delete(obj, "cache_control")
+			*excess--
+		}
+	}
+}
+
+func stripMessageCacheControl(messages []any, excess *int) {
+	for _, msg := range messages {
+		if *excess <= 0 {
+			return
+		}
+		msgObj, ok := asObject(msg)
+		if !ok {
+			continue
+		}
+		content, ok := asArray(msgObj["content"])
+		if !ok {
+			continue
+		}
+		for _, item := range content {
+			if *excess <= 0 {
+				return
+			}
+			obj, ok := asObject(item)
+			if !ok {
+				continue
+			}
+			if _, exists := obj["cache_control"]; exists {
+				delete(obj, "cache_control")
+				*excess--
+			}
+		}
+	}
+}
+
+func normalizeCacheControlTTL(payload []byte) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+
+	seen5m := false
+
+	if tools, ok := asArray(root["tools"]); ok {
+		for _, tool := range tools {
+			if obj, ok := asObject(tool); ok {
+				normalizeTTLForBlock(obj, &seen5m)
+			}
+		}
+	}
+
+	if system, ok := asArray(root["system"]); ok {
+		for _, item := range system {
+			if obj, ok := asObject(item); ok {
+				normalizeTTLForBlock(obj, &seen5m)
+			}
+		}
+	}
+
+	if messages, ok := asArray(root["messages"]); ok {
+		for _, msg := range messages {
+			msgObj, ok := asObject(msg)
+			if !ok {
+				continue
+			}
+			content, ok := asArray(msgObj["content"])
+			if !ok {
+				continue
+			}
+			for _, item := range content {
+				if obj, ok := asObject(item); ok {
+					normalizeTTLForBlock(obj, &seen5m)
+				}
+			}
+		}
+	}
+
+	return marshalPayloadObject(payload, root)
+}
+
+func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
+	root, ok := parsePayloadObject(payload)
+	if !ok {
+		return payload
+	}
+
+	total := countCacheControlsMap(root)
+	if total <= maxBlocks {
+		return payload
+	}
+
+	excess := total - maxBlocks
+
+	var system []any
+	if arr, ok := asArray(root["system"]); ok {
+		system = arr
+	}
+	var tools []any
+	if arr, ok := asArray(root["tools"]); ok {
+		tools = arr
+	}
+	var messages []any
+	if arr, ok := asArray(root["messages"]); ok {
+		messages = arr
+	}
+
+	if len(system) > 0 {
+		stripCacheControlExceptIndex(system, findLastCacheControlIndex(system), &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(tools) > 0 {
+		stripCacheControlExceptIndex(tools, findLastCacheControlIndex(tools), &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(messages) > 0 {
+		stripMessageCacheControl(messages, &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(system) > 0 {
+		stripAllCacheControl(system, &excess)
+	}
+	if excess <= 0 {
+		return marshalPayloadObject(payload, root)
+	}
+
+	if len(tools) > 0 {
+		stripAllCacheControl(tools, &excess)
+	}
+
+	return marshalPayloadObject(payload, root)
 }
 
 type compositeReadCloser struct {
@@ -783,7 +1082,47 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
+func mapStainlessOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "MacOS"
+	case "windows":
+		return "Windows"
+	case "linux":
+		return "Linux"
+	case "freebsd":
+		return "FreeBSD"
+	default:
+		return "Other::" + runtime.GOOS
+	}
+}
+
+func mapStainlessArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "x86"
+	default:
+		return "other::" + runtime.GOARCH
+	}
+}
+
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+	hdrDefault := func(cfgVal, fallback string) string {
+		if cfgVal != "" {
+			return cfgVal
+		}
+		return fallback
+	}
+
+	var hd config.ClaudeHeaderDefaults
+	if cfg != nil {
+		hd = cfg.ClaudeHeaderDefaults
+	}
+
 	useAPIKey := auth != nil && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""
 	forceAnthropicBase := strings.TrimSpace(os.Getenv(anthropicBaseURLEnv)) != ""
 	isAnthropicBase := forceAnthropicBase || (r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") && strings.EqualFold(r.URL.Host, "api.anthropic.com"))
@@ -800,23 +1139,28 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	promptCachingBeta := "prompt-caching-2024-07-31"
-	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14," + promptCachingBeta
+	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		baseBetas = val
 		if !strings.Contains(val, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
-	if !strings.Contains(baseBetas, promptCachingBeta) {
-		baseBetas += "," + promptCachingBeta
+
+	hasClaude1MHeader := false
+	if ginHeaders != nil {
+		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
+			hasClaude1MHeader = true
+		}
 	}
 
-	// Merge extra betas from request body
-	if len(extraBetas) > 0 {
+	if len(extraBetas) > 0 || hasClaude1MHeader {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
-			existingSet[strings.TrimSpace(b)] = true
+			betaName := strings.TrimSpace(b)
+			if betaName != "" {
+				existingSet[betaName] = true
+			}
 		}
 		for _, beta := range extraBetas {
 			beta = strings.TrimSpace(beta)
@@ -825,34 +1169,48 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				existingSet[beta] = true
 			}
 		}
+		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
+			baseBetas += ",context-1m-2025-08-07"
+		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Helper-Method", "stream")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", "v24.3.0")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", "0.55.1")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime-Version", hdrDefault(hd.RuntimeVersion, "v24.3.0"))
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Package-Version", hdrDefault(hd.PackageVersion, "0.74.0"))
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", "arm64")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", "MacOS")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", "60")
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", "claude-cli/1.0.83 (external, cli)")
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Arch", mapStainlessArch())
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Os", mapStainlessOS())
+	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Timeout", hdrDefault(hd.Timeout, "600"))
+	clientUA := ""
+	if ginHeaders != nil {
+		clientUA = ginHeaders.Get("User-Agent")
+	}
+	if isClaudeCodeClient(clientUA) {
+		r.Header.Set("User-Agent", clientUA)
+	} else {
+		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
+	}
 	r.Header.Set("Connection", "keep-alive")
-	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
+		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if stream {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -872,22 +1230,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	system := gjson.GetBytes(payload, "system")
-	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
-	if system.IsArray() {
-		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
-				}
-				return true
-			})
-			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		}
-	} else {
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-	}
-	return payload
+	return checkSystemInstructionsWithMode(payload, false)
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1272,33 +1615,58 @@ func injectFakeUserID(payload []byte) []byte {
 	return payload
 }
 
-// checkSystemInstructionsWithMode injects Claude Code system prompt.
-// In strict mode, it replaces all user system messages.
-// In non-strict mode (default), it prepends to existing system messages.
+// generateBillingHeader creates the x-anthropic-billing-header text block that
+// real Claude Code prepends to every system prompt array.
+func generateBillingHeader(payload []byte) string {
+	h := sha256.Sum256(payload)
+	cch := hex.EncodeToString(h[:])[:5]
+
+	buildBytes := make([]byte, 2)
+	_, _ = rand.Read(buildBytes)
+	buildHash := hex.EncodeToString(buildBytes)[:3]
+
+	return fmt.Sprintf("x-anthropic-billing-header: cc_version=2.1.63.%s; cc_entrypoint=cli; cch=%s;", buildHash, cch)
+}
+
+// checkSystemInstructionsWithMode injects Claude Code-style system blocks.
+//
+//	system[0]: billing header (no cache_control)
+//	system[1]: agent identifier (no cache_control)
+//	system[2..]: user system messages (cache_control added when missing)
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 	system := gjson.GetBytes(payload, "system")
-	claudeCodeInstructions := `[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]`
+
+	billingText := generateBillingHeader(payload)
+	billingBlock := fmt.Sprintf(`{"type":"text","text":"%s"}`, billingText)
+	agentBlock := `{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."}`
 
 	if strictMode {
-		// Strict mode: replace all system messages with Claude Code prompt only
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+		result := "[" + billingBlock + "," + agentBlock + "]"
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
 		return payload
 	}
 
-	// Non-strict mode (default): prepend Claude Code prompt to existing system messages
-	if system.IsArray() {
-		if gjson.GetBytes(payload, "system.0.text").String() != "You are Claude Code, Anthropic's official CLI for Claude." {
-			system.ForEach(func(_, part gjson.Result) bool {
-				if part.Get("type").String() == "text" {
-					claudeCodeInstructions, _ = sjson.SetRaw(claudeCodeInstructions, "-1", part.Raw)
-				}
-				return true
-			})
-			payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
-		}
-	} else {
-		payload, _ = sjson.SetRawBytes(payload, "system", []byte(claudeCodeInstructions))
+	firstText := gjson.GetBytes(payload, "system.0.text").String()
+	if strings.HasPrefix(firstText, "x-anthropic-billing-header:") {
+		return payload
 	}
+
+	result := "[" + billingBlock + "," + agentBlock
+	if system.IsArray() {
+		system.ForEach(func(_, part gjson.Result) bool {
+			if part.Get("type").String() == "text" {
+				partJSON := part.Raw
+				if !part.Get("cache_control").Exists() {
+					partJSON, _ = sjson.Set(partJSON, "cache_control.type", "ephemeral")
+				}
+				result += "," + partJSON
+			}
+			return true
+		})
+	}
+	result += "]"
+
+	payload, _ = sjson.SetRawBytes(payload, "system", []byte(result))
 	return payload
 }
 
