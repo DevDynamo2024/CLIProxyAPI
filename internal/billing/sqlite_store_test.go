@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 )
@@ -24,7 +25,7 @@ func TestSQLiteStore_ModelPrices_DefaultAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolvePriceMicro: %v", err)
 	}
-	if source != "default" {
+	if source != "saved" {
 		t.Fatalf("source=%q", source)
 	}
 	if price.Prompt == 0 || price.Completion == 0 {
@@ -44,6 +45,143 @@ func TestSQLiteStore_ModelPrices_DefaultAndOverride(t *testing.T) {
 	}
 	if price2 != override {
 		t.Fatalf("price=%+v want=%+v", price2, override)
+	}
+}
+
+func TestSQLiteStore_ModelPrices_DefaultCoverage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	cases := []struct {
+		model string
+		want  PriceMicroUSDPer1M
+	}{
+		{
+			model: "claude-opus-4-6",
+			want:  PriceMicroUSDPer1M{Prompt: 5_000_000, Completion: 25_000_000, Cached: 500_000},
+		},
+		{
+			model: "claude-sonnet-4-6",
+			want:  PriceMicroUSDPer1M{Prompt: 3_000_000, Completion: 15_000_000, Cached: 300_000},
+		},
+		{
+			model: "claude-haiku-4-5-20251001",
+			want:  PriceMicroUSDPer1M{Prompt: 1_000_000, Completion: 5_000_000, Cached: 100_000},
+		},
+		{
+			model: "gpt-5.4(high)",
+			want:  PriceMicroUSDPer1M{Prompt: 2_500_000, Completion: 15_000_000, Cached: 250_000},
+		},
+	}
+
+	for _, tc := range cases {
+		price, source, _, err := store.ResolvePriceMicro(ctx, tc.model)
+		if err != nil {
+			t.Fatalf("ResolvePriceMicro(%q): %v", tc.model, err)
+		}
+		if source != "saved" {
+			t.Fatalf("ResolvePriceMicro(%q) source=%q", tc.model, source)
+		}
+		if price != tc.want {
+			t.Fatalf("ResolvePriceMicro(%q) price=%+v want=%+v", tc.model, price, tc.want)
+		}
+	}
+}
+
+func TestSQLiteStore_DefaultPricesSeededToDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	prices, err := store.ListModelPrices(ctx)
+	if err != nil {
+		t.Fatalf("ListModelPrices: %v", err)
+	}
+	if len(prices) < len(DefaultPrices) {
+		t.Fatalf("prices=%d want_at_least=%d", len(prices), len(DefaultPrices))
+	}
+
+	found := false
+	for _, item := range prices {
+		if item.Model == policy.NormaliseModelKey("gpt-5.4") {
+			found = true
+			if item.Source != "saved" {
+				t.Fatalf("source=%q", item.Source)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing seeded price for gpt-5.4")
+	}
+}
+
+func TestSQLiteStore_BuildHistoricalUsageSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.AddUsage(ctx, "k1", "claude-opus-4-6", "2026-03-06", DailyUsageRow{
+		Requests:        10,
+		FailedRequests:  2,
+		InputTokens:     1_000,
+		OutputTokens:    500,
+		ReasoningTokens: 200,
+		CachedTokens:    100,
+		TotalTokens:     1_800,
+	}); err != nil {
+		t.Fatalf("AddUsage: %v", err)
+	}
+	if err := store.AddUsage(ctx, "k1", "claude-opus-4-6", "2026-03-09", DailyUsageRow{
+		Requests:    1,
+		TotalTokens: 10,
+	}); err != nil {
+		t.Fatalf("AddUsage(today): %v", err)
+	}
+
+	snapshot, err := store.BuildHistoricalUsageSnapshot(ctx, "2026-03-09")
+	if err != nil {
+		t.Fatalf("BuildHistoricalUsageSnapshot: %v", err)
+	}
+
+	if snapshot.TotalRequests != 10 || snapshot.SuccessCount != 8 || snapshot.FailureCount != 2 {
+		t.Fatalf("snapshot totals=%+v", snapshot)
+	}
+	if snapshot.RequestsByDay["2026-03-06"] != 10 {
+		t.Fatalf("requests_by_day=%v", snapshot.RequestsByDay)
+	}
+	if snapshot.RequestsByDay["2026-03-09"] != 0 {
+		t.Fatalf("today should be excluded: %v", snapshot.RequestsByDay)
+	}
+
+	apiSnapshot, ok := snapshot.APIs["k1"]
+	if !ok {
+		t.Fatalf("missing api snapshot")
+	}
+	modelSnapshot, ok := apiSnapshot.Models[policy.NormaliseModelKey("claude-opus-4-6")]
+	if !ok {
+		t.Fatalf("missing model snapshot")
+	}
+	if len(modelSnapshot.Details) != 1 {
+		t.Fatalf("details=%d", len(modelSnapshot.Details))
+	}
+	if modelSnapshot.Details[0].RequestCount != 10 || modelSnapshot.Details[0].SuccessCount != 8 || modelSnapshot.Details[0].FailureCount != 2 {
+		t.Fatalf("detail=%+v", modelSnapshot.Details[0])
 	}
 }
 
@@ -92,5 +230,129 @@ func TestSQLiteStore_AddUsageAndDailyCost(t *testing.T) {
 	}
 	if len(report.Models) != 1 {
 		t.Fatalf("models=%d", len(report.Models))
+	}
+}
+
+func TestSQLiteStore_RecalculateHistoricalCostsOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	ctx := context.Background()
+	apiKey := "k"
+	day := "2026-03-06"
+	if err := store.AddUsage(ctx, apiKey, "gpt-5.4", day, DailyUsageRow{
+		Requests:     1,
+		InputTokens:  1_000_000,
+		TotalTokens:  1_000_000,
+		CostMicroUSD: 0,
+	}); err != nil {
+		t.Fatalf("AddUsage: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(reopen): %v", err)
+	}
+	defer reopened.Close()
+
+	report, err := reopened.GetDailyUsageReport(ctx, apiKey, day)
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport: %v", err)
+	}
+	if report.TotalCostMicro != 2_500_000 {
+		t.Fatalf("TotalCostMicro=%d want=%d", report.TotalCostMicro, int64(2_500_000))
+	}
+}
+
+func TestSQLiteStore_UpsertModelPriceRecalculatesHistoricalUsage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	apiKey := "k"
+	day := "2026-03-06"
+	model := "custom-model"
+	if err := store.AddUsage(ctx, apiKey, model, day, DailyUsageRow{
+		Requests:     1,
+		InputTokens:  2,
+		TotalTokens:  2,
+		CostMicroUSD: 0,
+	}); err != nil {
+		t.Fatalf("AddUsage: %v", err)
+	}
+
+	reportBefore, err := store.GetDailyUsageReport(ctx, apiKey, day)
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport(before): %v", err)
+	}
+	if reportBefore.TotalCostMicro != 0 {
+		t.Fatalf("TotalCostMicro(before)=%d", reportBefore.TotalCostMicro)
+	}
+
+	if err := store.UpsertModelPrice(ctx, model, PriceMicroUSDPer1M{
+		Prompt:     1_000_000,
+		Completion: 0,
+		Cached:     0,
+	}); err != nil {
+		t.Fatalf("UpsertModelPrice: %v", err)
+	}
+
+	reportAfter, err := store.GetDailyUsageReport(ctx, apiKey, day)
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport(after): %v", err)
+	}
+	if reportAfter.TotalCostMicro != 2 {
+		t.Fatalf("TotalCostMicro(after)=%d want=%d", reportAfter.TotalCostMicro, int64(2))
+	}
+}
+
+func TestSQLiteStore_ListUsageEventAggregateRows(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	base := time.Date(2026, 3, 9, 12, 0, 0, 0, time.UTC).Unix()
+	events := []UsageEventRow{
+		{RequestedAt: base, APIKey: "k1", Source: "alpha.json", AuthIndex: "11", Model: "gpt-5.4"},
+		{RequestedAt: base + 1, APIKey: "k1", Source: "alpha.json", AuthIndex: "11", Model: "gpt-5.4", Failed: true},
+		{RequestedAt: base + 2, APIKey: "k2", Source: "beta.json", AuthIndex: "12", Model: "gpt-5.4"},
+	}
+	for _, event := range events {
+		if err := store.AddUsageEvent(ctx, event); err != nil {
+			t.Fatalf("AddUsageEvent: %v", err)
+		}
+	}
+
+	rows, err := store.ListUsageEventAggregateRows(ctx)
+	if err != nil {
+		t.Fatalf("ListUsageEventAggregateRows: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows=%d want=2", len(rows))
+	}
+
+	if rows[0].Source != "alpha.json" || rows[0].AuthIndex != "11" || rows[0].SuccessCount != 1 || rows[0].FailureCount != 1 {
+		t.Fatalf("rows[0]=%+v", rows[0])
+	}
+	if rows[1].Source != "beta.json" || rows[1].AuthIndex != "12" || rows[1].SuccessCount != 1 || rows[1].FailureCount != 0 {
+		t.Fatalf("rows[1]=%+v", rows[1])
 	}
 }

@@ -41,3 +41,24 @@ func costMicroUSD(tokens int64, microUSDPer1M int64) int64 {
 	// Round to nearest micro-USD at the end.
 	return (tokens*microUSDPer1M + tokensPerMillion/2) / tokensPerMillion
 }
+
+func calculateUsageCostMicro(inputTokens, outputTokens, reasoningTokens, cachedTokens int64, price PriceMicroUSDPer1M) int64 {
+	promptTokens := inputTokens - cachedTokens
+	if promptTokens < 0 {
+		promptTokens = 0
+	}
+	completionTokens := outputTokens + reasoningTokens
+	if completionTokens < 0 {
+		completionTokens = 0
+	}
+
+	cost := int64(0)
+	cost += costMicroUSD(promptTokens, price.Prompt)
+	cost += costMicroUSD(cachedTokens, price.Cached)
+	cost += costMicroUSD(completionTokens, price.Completion)
+	return cost
+}
+
+func CalculateUsageCostMicro(inputTokens, outputTokens, reasoningTokens, cachedTokens int64, price PriceMicroUSDPer1M) int64 {
+	return calculateUsageCostMicro(inputTokens, outputTokens, reasoningTokens, cachedTokens, price)
+}

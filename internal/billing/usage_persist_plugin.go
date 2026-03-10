@@ -44,20 +44,11 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		detail.TotalTokens = 0
 	}
 
-	promptTokens := detail.InputTokens - detail.CachedTokens
-	if promptTokens < 0 {
-		promptTokens = 0
-	}
-	completionTokens := detail.OutputTokens + detail.ReasoningTokens
-
 	price, _, _, err := p.store.ResolvePriceMicro(ctx, modelKey)
 	if err != nil {
 		return
 	}
-	cost := int64(0)
-	cost += costMicroUSD(promptTokens, price.Prompt)
-	cost += costMicroUSD(detail.CachedTokens, price.Cached)
-	cost += costMicroUSD(completionTokens, price.Completion)
+	cost := calculateUsageCostMicro(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens, detail.CachedTokens, price)
 
 	delta := DailyUsageRow{
 		Requests:        1,
@@ -70,9 +61,30 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		CostMicroUSD:    max64(0, cost),
 	}
 	_ = p.store.AddUsage(ctx, apiKey, modelKey, dayKey, delta)
+	_ = p.store.AddUsageEvent(ctx, UsageEventRow{
+		RequestedAt:     ts.Unix(),
+		APIKey:          apiKey,
+		Source:          strings.TrimSpace(record.Source),
+		AuthIndex:       strings.TrimSpace(record.AuthIndex),
+		Model:           modelKey,
+		Failed:          record.Failed,
+		InputTokens:     max64(0, detail.InputTokens),
+		OutputTokens:    max64(0, detail.OutputTokens),
+		ReasoningTokens: max64(0, detail.ReasoningTokens),
+		CachedTokens:    max64(0, detail.CachedTokens),
+		TotalTokens:     max64(0, detail.TotalTokens),
+		CostMicroUSD:    max64(0, cost),
+	})
 }
 
 func boolToInt64(v bool) int64 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func boolToSQLiteInt(v bool) int64 {
 	if v {
 		return 1
 	}

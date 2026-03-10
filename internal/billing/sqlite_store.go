@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	_ "modernc.org/sqlite"
 )
 
@@ -58,6 +59,14 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.syncDefaultModelPrices(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := store.recalculateUsageCosts(ctx, ""); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -100,7 +109,29 @@ func (s *SQLiteStore) ensureSchema(ctx context.Context) error {
 			PRIMARY KEY (api_key, model, day)
 		)
 		`,
+		`
+		CREATE TABLE IF NOT EXISTS usage_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			requested_at INTEGER NOT NULL,
+			api_key TEXT NOT NULL,
+			source TEXT NOT NULL,
+			auth_index TEXT NOT NULL,
+			model TEXT NOT NULL,
+			failed INTEGER NOT NULL,
+			input_tokens INTEGER NOT NULL,
+			output_tokens INTEGER NOT NULL,
+			reasoning_tokens INTEGER NOT NULL,
+			cached_tokens INTEGER NOT NULL,
+			total_tokens INTEGER NOT NULL,
+			cost_micro_usd INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)
+		`,
 		`CREATE INDEX IF NOT EXISTS idx_api_key_model_daily_usage_api_day ON api_key_model_daily_usage (api_key, day)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_requested_at ON usage_events (requested_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_source_requested_at ON usage_events (source, requested_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_auth_index_requested_at ON usage_events (auth_index, requested_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_usage_events_api_key_requested_at ON usage_events (api_key, requested_at)`,
 	}
 
 	for _, stmt := range stmts {
@@ -135,6 +166,9 @@ func (s *SQLiteStore) UpsertModelPrice(ctx context.Context, model string, price 
 	if err != nil {
 		return fmt.Errorf("billing sqlite: upsert model price: %w", err)
 	}
+	if err := s.recalculateUsageCosts(ctx, key); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -151,6 +185,11 @@ func (s *SQLiteStore) DeleteModelPrice(ctx context.Context, model string) (bool,
 		return false, fmt.Errorf("billing sqlite: delete model price: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	if n > 0 {
+		if err := s.recalculateUsageCosts(ctx, key); err != nil {
+			return false, err
+		}
+	}
 	return n > 0, nil
 }
 
@@ -375,9 +414,470 @@ func (s *SQLiteStore) GetDailyUsageReport(ctx context.Context, apiKey, dayKey st
 	return report, nil
 }
 
+func (s *SQLiteStore) AddUsageEvent(ctx context.Context, event UsageEventRow) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("billing sqlite: not initialized")
+	}
+	if event.RequestedAt <= 0 {
+		return fmt.Errorf("billing sqlite: requested_at is required")
+	}
+	if strings.TrimSpace(event.APIKey) == "" {
+		return fmt.Errorf("billing sqlite: api_key is required")
+	}
+	modelKey := policy.NormaliseModelKey(event.Model)
+	if modelKey == "" {
+		return fmt.Errorf("billing sqlite: model is required")
+	}
+	now := nowUnixUTC()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO usage_events (
+			requested_at, api_key, source, auth_index, model, failed,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			cost_micro_usd, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		event.RequestedAt,
+		strings.TrimSpace(event.APIKey),
+		strings.TrimSpace(event.Source),
+		strings.TrimSpace(event.AuthIndex),
+		modelKey,
+		boolToSQLiteInt(event.Failed),
+		max64(0, event.InputTokens),
+		max64(0, event.OutputTokens),
+		max64(0, event.ReasoningTokens),
+		max64(0, event.CachedTokens),
+		max64(0, event.TotalTokens),
+		max64(0, event.CostMicroUSD),
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: add usage event: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListDailyUsageRows(ctx context.Context, startDay, endDay string) ([]DailyUsageRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	query := `
+		SELECT
+			api_key, model, day,
+			requests, failed_requests,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			cost_micro_usd, updated_at
+		FROM api_key_model_daily_usage
+	`
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if trimmed := strings.TrimSpace(startDay); trimmed != "" {
+		conditions = append(conditions, "day >= ?")
+		args = append(args, trimmed)
+	}
+	if trimmed := strings.TrimSpace(endDay); trimmed != "" {
+		conditions = append(conditions, "day <= ?")
+		args = append(args, trimmed)
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY day ASC, api_key ASC, model ASC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("billing sqlite: list daily usage rows: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]DailyUsageRow, 0)
+	for rows.Next() {
+		var row DailyUsageRow
+		if err := rows.Scan(
+			&row.APIKey, &row.Model, &row.Day,
+			&row.Requests, &row.FailedRequests,
+			&row.InputTokens, &row.OutputTokens, &row.ReasoningTokens, &row.CachedTokens, &row.TotalTokens,
+			&row.CostMicroUSD, &row.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("billing sqlite: scan daily usage row: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("billing sqlite: daily usage rows: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SQLiteStore) ListUsageEvents(ctx context.Context, startAt, endAt time.Time) ([]UsageEventRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	query := `
+		SELECT
+			id, requested_at, api_key, source, auth_index, model, failed,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			cost_micro_usd, updated_at
+		FROM usage_events
+	`
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	if !startAt.IsZero() {
+		conditions = append(conditions, "requested_at >= ?")
+		args = append(args, startAt.Unix())
+	}
+	if !endAt.IsZero() {
+		conditions = append(conditions, "requested_at <= ?")
+		args = append(args, endAt.Unix())
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY requested_at ASC, id ASC"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("billing sqlite: list usage events: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]UsageEventRow, 0)
+	for rows.Next() {
+		var row UsageEventRow
+		var failed int64
+		if err := rows.Scan(
+			&row.ID,
+			&row.RequestedAt,
+			&row.APIKey,
+			&row.Source,
+			&row.AuthIndex,
+			&row.Model,
+			&failed,
+			&row.InputTokens,
+			&row.OutputTokens,
+			&row.ReasoningTokens,
+			&row.CachedTokens,
+			&row.TotalTokens,
+			&row.CostMicroUSD,
+			&row.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("billing sqlite: scan usage event: %w", err)
+		}
+		row.Failed = failed > 0
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("billing sqlite: usage event rows: %w", err)
+	}
+	return result, nil
+}
+
+func (s *SQLiteStore) ListUsageEventAggregateRows(ctx context.Context) ([]UsageEventAggregateRow, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			source,
+			auth_index,
+			COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0) AS success_count,
+			COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0) AS failure_count
+		FROM usage_events
+		GROUP BY source, auth_index
+		ORDER BY source ASC, auth_index ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("billing sqlite: list usage event aggregates: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]UsageEventAggregateRow, 0)
+	for rows.Next() {
+		var row UsageEventAggregateRow
+		if err := rows.Scan(&row.Source, &row.AuthIndex, &row.SuccessCount, &row.FailureCount); err != nil {
+			return nil, fmt.Errorf("billing sqlite: scan usage event aggregate: %w", err)
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("billing sqlite: usage event aggregate rows: %w", err)
+	}
+	return result, nil
+}
+
 func max64(a, b int64) int64 {
 	if a > b {
 		return a
 	}
 	return b
+}
+
+func (s *SQLiteStore) syncDefaultModelPrices(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("billing sqlite: not initialized")
+	}
+	if len(DefaultPrices) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: begin default price sync: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO model_prices (
+			model,
+			prompt_micro_usd_per_1m,
+			completion_micro_usd_per_1m,
+			cached_micro_usd_per_1m,
+			updated_at
+		) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(model) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: prepare default price sync: %w", err)
+	}
+	defer stmt.Close()
+
+	now := nowUnixUTC()
+	for model, price := range DefaultPrices {
+		if _, err := stmt.ExecContext(ctx, model, price.Prompt, price.Completion, price.Cached, now); err != nil {
+			return fmt.Errorf("billing sqlite: sync default price %q: %w", model, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("billing sqlite: commit default price sync: %w", err)
+	}
+	return nil
+}
+
+type usageCostRecalcRow struct {
+	APIKey          string
+	Model           string
+	Day             string
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CachedTokens    int64
+}
+
+func (s *SQLiteStore) BuildHistoricalUsageSnapshot(ctx context.Context, beforeDay string) (internalusage.StatisticsSnapshot, error) {
+	snapshot := internalusage.StatisticsSnapshot{
+		APIs:           map[string]internalusage.APISnapshot{},
+		RequestsByDay:  map[string]int64{},
+		RequestsByHour: map[string]int64{},
+		TokensByDay:    map[string]int64{},
+		TokensByHour:   map[string]int64{},
+	}
+	if s == nil || s.db == nil {
+		return snapshot, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	query := `
+		SELECT
+			api_key,
+			model,
+			day,
+			requests,
+			failed_requests,
+			input_tokens,
+			output_tokens,
+			reasoning_tokens,
+			cached_tokens,
+			total_tokens
+		FROM api_key_model_daily_usage
+	`
+	args := []any{}
+	if strings.TrimSpace(beforeDay) != "" {
+		query += ` WHERE day < ?`
+		args = append(args, strings.TrimSpace(beforeDay))
+	}
+	query += ` ORDER BY day ASC, api_key ASC, model ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return snapshot, fmt.Errorf("billing sqlite: query historical usage snapshot: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			apiKey          string
+			model           string
+			day             string
+			requests        int64
+			failedRequests  int64
+			inputTokens     int64
+			outputTokens    int64
+			reasoningTokens int64
+			cachedTokens    int64
+			totalTokens     int64
+		)
+		if err := rows.Scan(
+			&apiKey,
+			&model,
+			&day,
+			&requests,
+			&failedRequests,
+			&inputTokens,
+			&outputTokens,
+			&reasoningTokens,
+			&cachedTokens,
+			&totalTokens,
+		); err != nil {
+			return snapshot, fmt.Errorf("billing sqlite: scan historical usage snapshot: %w", err)
+		}
+
+		successCount := max64(requests-failedRequests, 0)
+		detail := internalusage.RequestDetail{
+			Timestamp: historicalDetailTimestamp(day),
+			Source:    apiKey,
+			Tokens: internalusage.TokenStats{
+				InputTokens:     max64(0, inputTokens),
+				OutputTokens:    max64(0, outputTokens),
+				ReasoningTokens: max64(0, reasoningTokens),
+				CachedTokens:    max64(0, cachedTokens),
+				TotalTokens:     max64(0, totalTokens),
+			},
+			Failed:       requests > 0 && failedRequests >= requests,
+			RequestCount: max64(0, requests),
+			SuccessCount: successCount,
+			FailureCount: max64(0, failedRequests),
+		}
+
+		apiSnapshot := snapshot.APIs[apiKey]
+		if apiSnapshot.Models == nil {
+			apiSnapshot.Models = map[string]internalusage.ModelSnapshot{}
+		}
+		apiSnapshot.TotalRequests += max64(0, requests)
+		apiSnapshot.SuccessCount += successCount
+		apiSnapshot.FailureCount += max64(0, failedRequests)
+		apiSnapshot.TotalTokens += max64(0, totalTokens)
+
+		modelSnapshot := apiSnapshot.Models[model]
+		modelSnapshot.TotalRequests += max64(0, requests)
+		modelSnapshot.SuccessCount += successCount
+		modelSnapshot.FailureCount += max64(0, failedRequests)
+		modelSnapshot.TotalTokens += max64(0, totalTokens)
+		modelSnapshot.Details = append(modelSnapshot.Details, detail)
+		apiSnapshot.Models[model] = modelSnapshot
+		snapshot.APIs[apiKey] = apiSnapshot
+
+		snapshot.TotalRequests += max64(0, requests)
+		snapshot.SuccessCount += successCount
+		snapshot.FailureCount += max64(0, failedRequests)
+		snapshot.TotalTokens += max64(0, totalTokens)
+		snapshot.RequestsByDay[day] += max64(0, requests)
+		snapshot.TokensByDay[day] += max64(0, totalTokens)
+	}
+	if err := rows.Err(); err != nil {
+		return snapshot, fmt.Errorf("billing sqlite: historical usage snapshot rows: %w", err)
+	}
+
+	return snapshot, nil
+}
+
+func historicalDetailTimestamp(day string) time.Time {
+	loc := time.FixedZone("CST", 8*60*60)
+	parsed, err := time.ParseInLocation("2006-01-02 15:04:05", strings.TrimSpace(day)+" 23:59:59", loc)
+	if err != nil {
+		return time.Now().In(loc)
+	}
+	return parsed
+}
+
+func (s *SQLiteStore) recalculateUsageCosts(ctx context.Context, model string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	modelKey := strings.TrimSpace(model)
+	query := `
+		SELECT api_key, model, day, input_tokens, output_tokens, reasoning_tokens, cached_tokens
+		FROM api_key_model_daily_usage
+	`
+	args := []any{}
+	if modelKey != "" {
+		query += ` WHERE model = ?`
+		args = append(args, modelKey)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: query usage for cost repair: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]usageCostRecalcRow, 0)
+	models := map[string]struct{}{}
+	for rows.Next() {
+		var item usageCostRecalcRow
+		if err := rows.Scan(
+			&item.APIKey,
+			&item.Model,
+			&item.Day,
+			&item.InputTokens,
+			&item.OutputTokens,
+			&item.ReasoningTokens,
+			&item.CachedTokens,
+		); err != nil {
+			return fmt.Errorf("billing sqlite: scan usage for cost repair: %w", err)
+		}
+		items = append(items, item)
+		models[item.Model] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("billing sqlite: usage rows for cost repair: %w", err)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	priceByModel := make(map[string]PriceMicroUSDPer1M, len(models))
+	for modelKey := range models {
+		price, _, _, err := s.ResolvePriceMicro(ctx, modelKey)
+		if err != nil {
+			return err
+		}
+		priceByModel[modelKey] = price
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: begin cost repair: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	stmt, err := tx.PrepareContext(ctx, `
+		UPDATE api_key_model_daily_usage
+		SET cost_micro_usd = ?, updated_at = ?
+		WHERE api_key = ? AND model = ? AND day = ?
+	`)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: prepare cost repair: %w", err)
+	}
+	defer stmt.Close()
+
+	now := nowUnixUTC()
+	for _, item := range items {
+		price := priceByModel[item.Model]
+		cost := calculateUsageCostMicro(item.InputTokens, item.OutputTokens, item.ReasoningTokens, item.CachedTokens, price)
+		if _, err := stmt.ExecContext(ctx, cost, now, item.APIKey, item.Model, item.Day); err != nil {
+			return fmt.Errorf("billing sqlite: update repaired cost: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("billing sqlite: commit cost repair: %w", err)
+	}
+	return nil
 }

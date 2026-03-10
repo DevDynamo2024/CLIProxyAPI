@@ -36,6 +36,33 @@ type DailyUsageRow struct {
 	UpdatedAt    int64 `json:"updated_at,omitempty"`
 }
 
+type UsageEventRow struct {
+	ID int64 `json:"id,omitempty"`
+
+	RequestedAt int64  `json:"requested_at"`
+	APIKey      string `json:"api_key"`
+	Source      string `json:"source"`
+	AuthIndex   string `json:"auth_index"`
+	Model       string `json:"model"`
+	Failed      bool   `json:"failed"`
+
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CachedTokens    int64 `json:"cached_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
+
+	CostMicroUSD int64 `json:"cost_micro_usd"`
+	UpdatedAt    int64 `json:"updated_at,omitempty"`
+}
+
+type UsageEventAggregateRow struct {
+	Source       string `json:"source"`
+	AuthIndex    string `json:"auth_index"`
+	SuccessCount int64  `json:"success_count"`
+	FailureCount int64  `json:"failure_count"`
+}
+
 type DailyUsageReport struct {
 	APIKey          string          `json:"api_key"`
 	Day             string          `json:"day"`

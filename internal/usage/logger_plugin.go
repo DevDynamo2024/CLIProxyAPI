@@ -76,6 +76,8 @@ type RequestStatistics struct {
 // apiStats holds aggregated metrics for a single API key.
 type apiStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Models        map[string]*modelStats
 }
@@ -83,17 +85,22 @@ type apiStats struct {
 // modelStats holds aggregated metrics for a specific model within an API.
 type modelStats struct {
 	TotalRequests int64
+	SuccessCount  int64
+	FailureCount  int64
 	TotalTokens   int64
 	Details       []RequestDetail
 }
 
 // RequestDetail stores the timestamp and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp    time.Time  `json:"timestamp"`
+	Source       string     `json:"source"`
+	AuthIndex    string     `json:"auth_index"`
+	Tokens       TokenStats `json:"tokens"`
+	Failed       bool       `json:"failed"`
+	RequestCount int64      `json:"request_count,omitempty"`
+	SuccessCount int64      `json:"success_count,omitempty"`
+	FailureCount int64      `json:"failure_count,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -123,6 +130,8 @@ type StatisticsSnapshot struct {
 // APISnapshot summarises metrics for a single API key.
 type APISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
+	SuccessCount  int64                    `json:"success_count"`
+	FailureCount  int64                    `json:"failure_count"`
 	TotalTokens   int64                    `json:"total_tokens"`
 	Models        map[string]ModelSnapshot `json:"models"`
 }
@@ -130,6 +139,8 @@ type APISnapshot struct {
 // ModelSnapshot summarises metrics for a specific model.
 type ModelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
+	SuccessCount  int64           `json:"success_count"`
+	FailureCount  int64           `json:"failure_count"`
 	TotalTokens   int64           `json:"total_tokens"`
 	Details       []RequestDetail `json:"details"`
 }
@@ -164,6 +175,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
+	requestCount := detailRequestCount(RequestDetail{Tokens: detail})
 	statsKey := record.APIKey
 	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
@@ -183,11 +195,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.totalRequests++
+	s.totalRequests += requestCount
 	if success {
-		s.successCount++
+		s.successCount += requestCount
 	} else {
-		s.failureCount++
+		s.failureCount += requestCount
 	}
 	s.totalTokens += totalTokens
 
@@ -204,21 +216,28 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		Failed:    failed,
 	})
 
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
+	s.requestsByDay[dayKey] += requestCount
+	s.requestsByHour[hourKey] += requestCount
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
-	stats.TotalRequests++
+	requestCount := detailRequestCount(detail)
+	successCount, failureCount := detailOutcomeCounts(detail)
+
+	stats.TotalRequests += requestCount
+	stats.SuccessCount += successCount
+	stats.FailureCount += failureCount
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
 		modelStatsValue = &modelStats{}
 		stats.Models[model] = modelStatsValue
 	}
-	modelStatsValue.TotalRequests++
+	modelStatsValue.TotalRequests += requestCount
+	modelStatsValue.SuccessCount += successCount
+	modelStatsValue.FailureCount += failureCount
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
 }
@@ -242,6 +261,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	for apiName, stats := range s.apis {
 		apiSnapshot := APISnapshot{
 			TotalRequests: stats.TotalRequests,
+			SuccessCount:  stats.SuccessCount,
+			FailureCount:  stats.FailureCount,
 			TotalTokens:   stats.TotalTokens,
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
@@ -250,6 +271,8 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			copy(requestDetails, modelStatsValue.Details)
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
+				SuccessCount:  modelStatsValue.SuccessCount,
+				FailureCount:  modelStatsValue.FailureCount,
 				TotalTokens:   modelStatsValue.TotalTokens,
 				Details:       requestDetails,
 			}
@@ -355,13 +378,12 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	if totalTokens < 0 {
 		totalTokens = 0
 	}
+	requestCount := detailRequestCount(detail)
+	successCount, failureCount := detailOutcomeCounts(detail)
 
-	s.totalRequests++
-	if detail.Failed {
-		s.failureCount++
-	} else {
-		s.successCount++
-	}
+	s.totalRequests += requestCount
+	s.successCount += successCount
+	s.failureCount += failureCount
 	s.totalTokens += totalTokens
 
 	s.updateAPIStats(stats, modelName, detail)
@@ -369,10 +391,32 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
 
-	s.requestsByDay[dayKey]++
-	s.requestsByHour[hourKey]++
+	s.requestsByDay[dayKey] += requestCount
+	s.requestsByHour[hourKey] += requestCount
 	s.tokensByDay[dayKey] += totalTokens
 	s.tokensByHour[hourKey] += totalTokens
+}
+
+func detailRequestCount(detail RequestDetail) int64 {
+	if detail.RequestCount > 0 {
+		return detail.RequestCount
+	}
+	return 1
+}
+
+func detailOutcomeCounts(detail RequestDetail) (success int64, failure int64) {
+	if detail.SuccessCount > 0 || detail.FailureCount > 0 {
+		success = detail.SuccessCount
+		failure = detail.FailureCount
+		if success+failure == 0 {
+			return 1, 0
+		}
+		return success, failure
+	}
+	if detail.Failed {
+		return 0, detailRequestCount(detail)
+	}
+	return detailRequestCount(detail), 0
 }
 
 func dedupKey(apiName, modelName string, detail RequestDetail) string {
