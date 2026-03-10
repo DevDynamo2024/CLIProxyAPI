@@ -84,3 +84,66 @@ func NormalizeOpenAIToolsPayload(payload []byte) []byte {
 	}
 }
 
+// StripOpenAIToolsForImageInputs removes tool-related fields from multimodal OpenAI payloads.
+// Some OpenAI-compatible backends reject top-level tool parameters when image inputs are present,
+// so this keeps Claude -> GPT failover working for image uploads.
+func StripOpenAIToolsForImageInputs(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) || !hasOpenAIImageInput(payload) {
+		return payload
+	}
+
+	out := payload
+	for _, path := range []string{"tools", "tool_choice", "parallel_tool_calls", "functions", "function_call"} {
+		if updated, err := sjson.DeleteBytes(out, path); err == nil {
+			out = updated
+		}
+	}
+	return out
+}
+
+func hasOpenAIImageInput(payload []byte) bool {
+	hasImagePart := func(content gjson.Result) bool {
+		switch {
+		case content.IsArray():
+			parts := content.Array()
+			for i := 0; i < len(parts); i++ {
+				partType := parts[i].Get("type").String()
+				switch partType {
+				case "image_url", "input_image", "image":
+					return true
+				}
+			}
+		case content.IsObject():
+			partType := content.Get("type").String()
+			switch partType {
+			case "image_url", "input_image", "image":
+				return true
+			}
+		}
+		return false
+	}
+
+	if messages := gjson.GetBytes(payload, "messages"); messages.IsArray() {
+		arr := messages.Array()
+		for i := 0; i < len(arr); i++ {
+			if hasImagePart(arr[i].Get("content")) {
+				return true
+			}
+		}
+	}
+
+	if input := gjson.GetBytes(payload, "input"); input.IsArray() {
+		arr := input.Array()
+		for i := 0; i < len(arr); i++ {
+			item := arr[i]
+			if item.Get("type").String() == "input_image" {
+				return true
+			}
+			if hasImagePart(item.Get("content")) {
+				return true
+			}
+		}
+	}
+
+	return false
+}

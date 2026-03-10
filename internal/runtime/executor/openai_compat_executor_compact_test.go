@@ -56,3 +56,63 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 		t.Fatalf("payload = %s", string(resp.Payload))
 	}
 }
+
+func TestOpenAICompatExecutorDropsToolsForImageInputs(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	payload := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[
+			{
+				"role":"user",
+				"content":[
+					{"type":"text","text":"describe this image"},
+					{"type":"image_url","image_url":{"url":"data:image/png;base64,YWJj"}}
+				]
+			}
+		],
+		"tools":[
+			{"type":"function","function":{"name":"Bash","parameters":{"type":"object","properties":{}}}}
+		],
+		"tool_choice":"auto"
+	}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/chat/completions")
+	}
+	if !gjson.GetBytes(gotBody, "messages.0.content.1.image_url.url").Exists() {
+		t.Fatalf("expected image_url in body, got %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "tools").Exists() {
+		t.Fatalf("expected tools to be removed for image request, got %s", string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be removed for image request, got %s", string(gotBody))
+	}
+	if gjson.GetBytes(resp.Payload, "choices.0.message.content").String() != "ok" {
+		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
