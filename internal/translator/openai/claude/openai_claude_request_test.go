@@ -246,6 +246,23 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_DropsToolChoiceWithoutTools(t *testing.T) {
+	in := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[{"role":"user","content":"hi"}],
+		"tool_choice":{"type":"auto"}
+	}`)
+
+	out := ConvertClaudeRequestToOpenAI("gpt-5.4", in, false)
+
+	if gjson.GetBytes(out, "tools").Exists() {
+		t.Fatalf("expected no tools in translated payload, got %s", string(out))
+	}
+	if gjson.GetBytes(out, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be dropped without tools, got %s", string(out))
+	}
+}
+
 // TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved tests AC3:
 // that a message with only thinking content is preserved (not dropped).
 func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T) {

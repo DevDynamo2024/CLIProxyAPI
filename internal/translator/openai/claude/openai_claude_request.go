@@ -266,8 +266,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Process tools - convert Anthropic tools to OpenAI functions
+	hasOpenAITools := false
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		var toolsJSON = "[]"
+		toolCount := 0
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			openAIToolJSON := `{"type":"function","function":{"name":"","description":""}}`
@@ -280,16 +282,18 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			}
 
 			toolsJSON, _ = sjson.Set(toolsJSON, "-1", gjson.Parse(openAIToolJSON).Value())
+			toolCount++
 			return true
 		})
 
 		if gjson.Parse(toolsJSON).IsArray() && len(gjson.Parse(toolsJSON).Array()) > 0 {
 			out, _ = sjson.SetRaw(out, "tools", toolsJSON)
+			hasOpenAITools = toolCount > 0
 		}
 	}
 
 	// Tool choice mapping - convert Anthropic tool_choice to OpenAI format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && hasOpenAITools {
 		switch toolChoice.Get("type").String() {
 		case "auto":
 			out, _ = sjson.Set(out, "tool_choice", "auto")

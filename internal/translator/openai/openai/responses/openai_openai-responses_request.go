@@ -157,6 +157,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	// Convert tools from responses format to chat completions format
+	convertedToolCount := 0
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		var chatCompletionsTools []interface{}
 
@@ -189,6 +190,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			chatTool, _ = sjson.SetRaw(chatTool, "function", function)
 			chatCompletionsTools = append(chatCompletionsTools, gjson.Parse(chatTool).Value())
+			convertedToolCount++
 
 			return true
 		})
@@ -206,8 +208,13 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	}
 
 	// Convert tool_choice if present
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.Set(out, "tool_choice", toolChoice.String())
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && convertedToolCount > 0 {
+		switch toolChoice.Type {
+		case gjson.String:
+			out, _ = sjson.Set(out, "tool_choice", toolChoice.String())
+		case gjson.JSON:
+			out, _ = sjson.SetRaw(out, "tool_choice", toolChoice.Raw)
+		}
 	}
 
 	return []byte(out)

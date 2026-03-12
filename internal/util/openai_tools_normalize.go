@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -23,7 +24,7 @@ func NormalizeOpenAIToolsPayload(payload []byte) []byte {
 
 	tools := gjson.GetBytes(payload, "tools")
 	if !tools.Exists() {
-		return payload
+		return sanitizeOpenAIToolSelection(payload)
 	}
 
 	out := payload
@@ -46,7 +47,7 @@ func NormalizeOpenAIToolsPayload(payload []byte) []byte {
 				}
 			}
 		}
-		return out
+		return sanitizeOpenAIToolSelection(out)
 
 	case tools.IsObject():
 		if updated, err := sjson.DeleteBytes(out, "tools.defer_loading"); err == nil {
@@ -74,14 +75,94 @@ func NormalizeOpenAIToolsPayload(payload []byte) []byte {
 				out = updated
 			}
 		}
-		return out
+		return sanitizeOpenAIToolSelection(out)
 
 	default:
 		if updated, err := sjson.DeleteBytes(out, "tools"); err == nil {
 			out = updated
 		}
+		return sanitizeOpenAIToolSelection(out)
+	}
+}
+
+func sanitizeOpenAIToolSelection(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+
+	out := payload
+	hasDeclaredTools := false
+	functionNames := make(map[string]struct{})
+
+	if tools := gjson.GetBytes(out, "tools"); tools.Exists() && tools.IsArray() {
+		arr := tools.Array()
+		for i := 0; i < len(arr); i++ {
+			if !arr[i].IsObject() {
+				continue
+			}
+			hasDeclaredTools = true
+			if name := strings.TrimSpace(arr[i].Get("function.name").String()); name != "" {
+				functionNames[name] = struct{}{}
+				continue
+			}
+			if name := strings.TrimSpace(arr[i].Get("name").String()); name != "" {
+				functionNames[name] = struct{}{}
+			}
+		}
+	}
+
+	if functions := gjson.GetBytes(out, "functions"); functions.Exists() && functions.IsArray() {
+		arr := functions.Array()
+		for i := 0; i < len(arr); i++ {
+			if !arr[i].IsObject() {
+				continue
+			}
+			hasDeclaredTools = true
+			if name := strings.TrimSpace(arr[i].Get("name").String()); name != "" {
+				functionNames[name] = struct{}{}
+			}
+		}
+	}
+
+	if !hasDeclaredTools {
+		for _, path := range []string{"tool_choice", "parallel_tool_calls", "function_call"} {
+			if updated, err := sjson.DeleteBytes(out, path); err == nil {
+				out = updated
+			}
+		}
 		return out
 	}
+
+	if toolChoice := gjson.GetBytes(out, "tool_choice"); toolChoice.Exists() && toolChoice.IsObject() {
+		if strings.EqualFold(strings.TrimSpace(toolChoice.Get("type").String()), "function") {
+			name := strings.TrimSpace(toolChoice.Get("function.name").String())
+			if name == "" {
+				name = strings.TrimSpace(toolChoice.Get("name").String())
+			}
+			if name == "" {
+				if updated, err := sjson.DeleteBytes(out, "tool_choice"); err == nil {
+					out = updated
+				}
+			} else if _, ok := functionNames[name]; !ok {
+				if updated, err := sjson.DeleteBytes(out, "tool_choice"); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+
+	if functionCall := gjson.GetBytes(out, "function_call"); functionCall.Exists() && functionCall.IsObject() {
+		name := strings.TrimSpace(functionCall.Get("name").String())
+		if name != "" {
+			if _, ok := functionNames[name]; !ok {
+				if updated, err := sjson.DeleteBytes(out, "function_call"); err == nil {
+					out = updated
+				}
+			}
+		}
+	}
+
+	return out
 }
 
 // StripOpenAIToolsForImageInputs removes tool-related fields from multimodal OpenAI payloads.
