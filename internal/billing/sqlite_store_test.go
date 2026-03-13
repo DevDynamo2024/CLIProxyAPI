@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
 
 func TestSQLiteStore_ModelPrices_DefaultAndOverride(t *testing.T) {
@@ -270,6 +271,137 @@ func TestSQLiteStore_GetCostMicroUSDByDayRange(t *testing.T) {
 	}
 	if total != 200_000_000 {
 		t.Fatalf("total=%d", total)
+	}
+}
+
+func TestSQLiteStore_BuildUsageStatisticsSnapshot_DBFirst(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	if err := store.AddUsageEvent(ctx, UsageEventRow{
+		RequestedAt:  time.Date(2026, 3, 13, 10, 30, 0, 0, policy.ChinaLocation()).Unix(),
+		APIKey:       "k1",
+		Source:       "openai",
+		AuthIndex:    "0",
+		Model:        "gpt-5.4",
+		InputTokens:  100,
+		OutputTokens: 50,
+		TotalTokens:  150,
+		CostMicroUSD: 12,
+	}); err != nil {
+		t.Fatalf("AddUsageEvent: %v", err)
+	}
+	if err := store.AddUsage(ctx, "k1", "gpt-5.4", "2026-03-13", DailyUsageRow{
+		Requests:     1,
+		InputTokens:  100,
+		OutputTokens: 50,
+		TotalTokens:  150,
+		CostMicroUSD: 12,
+	}); err != nil {
+		t.Fatalf("AddUsage(today): %v", err)
+	}
+	if err := store.AddUsage(ctx, "k1", "gpt-5.4", "2026-03-10", DailyUsageRow{
+		Requests:        3,
+		FailedRequests:  1,
+		InputTokens:     300,
+		OutputTokens:    120,
+		ReasoningTokens: 30,
+		TotalTokens:     450,
+		CostMicroUSD:    40,
+	}); err != nil {
+		t.Fatalf("AddUsage(legacy): %v", err)
+	}
+
+	snapshot, err := store.BuildUsageStatisticsSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("BuildUsageStatisticsSnapshot: %v", err)
+	}
+	if snapshot.TotalRequests != 4 || snapshot.FailureCount != 1 || snapshot.TotalTokens != 600 {
+		t.Fatalf("snapshot totals=%+v", snapshot)
+	}
+	if snapshot.RequestsByDay["2026-03-13"] != 1 {
+		t.Fatalf("today requests=%v", snapshot.RequestsByDay)
+	}
+	if snapshot.RequestsByDay["2026-03-10"] != 3 {
+		t.Fatalf("legacy requests=%v", snapshot.RequestsByDay)
+	}
+	modelSnapshot := snapshot.APIs["k1"].Models[policy.NormaliseModelKey("gpt-5.4")]
+	if len(modelSnapshot.Details) != 2 {
+		t.Fatalf("details=%d", len(modelSnapshot.Details))
+	}
+}
+
+func TestSQLiteStore_ImportUsageStatisticsSnapshot_Deduplicates(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	snapshot := internalusage.StatisticsSnapshot{
+		APIs:          map[string]internalusage.APISnapshot{},
+		RequestsByDay: map[string]int64{},
+		TokensByDay:   map[string]int64{},
+	}
+	ts := time.Date(2026, 3, 13, 10, 30, 0, 0, policy.ChinaLocation())
+	snapshot.APIs["k1"] = internalusage.APISnapshot{
+		Models: map[string]internalusage.ModelSnapshot{
+			policy.NormaliseModelKey("gpt-5.4"): {
+				Details: []internalusage.RequestDetail{
+					{
+						Timestamp: ts,
+						Source:    "openai",
+						AuthIndex: "0",
+						Tokens: internalusage.TokenStats{
+							InputTokens:  100,
+							OutputTokens: 50,
+							TotalTokens:  150,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	result, err := store.ImportUsageStatisticsSnapshot(ctx, snapshot)
+	if err != nil {
+		t.Fatalf("ImportUsageStatisticsSnapshot: %v", err)
+	}
+	if result.Added != 1 || result.Skipped != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+
+	result, err = store.ImportUsageStatisticsSnapshot(ctx, snapshot)
+	if err != nil {
+		t.Fatalf("ImportUsageStatisticsSnapshot second: %v", err)
+	}
+	if result.Added != 0 || result.Skipped != 1 {
+		t.Fatalf("result2=%+v", result)
+	}
+
+	events, err := store.ListUsageEvents(ctx, time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatalf("ListUsageEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events=%d", len(events))
+	}
+	report, err := store.GetDailyUsageReport(ctx, "k1", "2026-03-13")
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport: %v", err)
+	}
+	if report.TotalRequests != 1 || report.TotalTokens != 150 {
+		t.Fatalf("report=%+v", report)
 	}
 }
 

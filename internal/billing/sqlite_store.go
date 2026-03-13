@@ -386,6 +386,183 @@ func (s *SQLiteStore) GetCostMicroUSDByDayRange(ctx context.Context, apiKey, sta
 	return total, nil
 }
 
+func (s *SQLiteStore) BuildUsageStatisticsSnapshot(ctx context.Context) (internalusage.StatisticsSnapshot, error) {
+	snapshot := internalusage.StatisticsSnapshot{
+		APIs:           map[string]internalusage.APISnapshot{},
+		RequestsByDay:  map[string]int64{},
+		RequestsByHour: map[string]int64{},
+		TokensByDay:    map[string]int64{},
+		TokensByHour:   map[string]int64{},
+	}
+	if s == nil || s.db == nil {
+		return snapshot, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	eventRows, err := s.ListUsageEvents(ctx, time.Time{}, time.Time{})
+	if err != nil {
+		return snapshot, err
+	}
+	eventDaily := make(map[string]DailyUsageRow, len(eventRows))
+	for _, row := range eventRows {
+		addUsageEventToSnapshot(&snapshot, row)
+
+		dayKey := policy.DayKeyChina(time.Unix(row.RequestedAt, 0))
+		key := usageAggregateKey(row.APIKey, row.Model, dayKey)
+		agg := eventDaily[key]
+		agg.APIKey = strings.TrimSpace(row.APIKey)
+		agg.Model = policy.NormaliseModelKey(row.Model)
+		agg.Day = dayKey
+		agg.Requests++
+		if row.Failed {
+			agg.FailedRequests++
+		}
+		agg.InputTokens += max64(0, row.InputTokens)
+		agg.OutputTokens += max64(0, row.OutputTokens)
+		agg.ReasoningTokens += max64(0, row.ReasoningTokens)
+		agg.CachedTokens += max64(0, row.CachedTokens)
+		agg.TotalTokens += max64(0, row.TotalTokens)
+		agg.CostMicroUSD += max64(0, row.CostMicroUSD)
+		eventDaily[key] = agg
+	}
+
+	dailyRows, err := s.ListDailyUsageRows(ctx, "", "")
+	if err != nil {
+		return snapshot, err
+	}
+	for _, row := range dailyRows {
+		key := usageAggregateKey(row.APIKey, row.Model, row.Day)
+		existing := eventDaily[key]
+		delta := DailyUsageRow{
+			APIKey:          strings.TrimSpace(row.APIKey),
+			Model:           policy.NormaliseModelKey(row.Model),
+			Day:             strings.TrimSpace(row.Day),
+			Requests:        max64(0, row.Requests-existing.Requests),
+			FailedRequests:  max64(0, row.FailedRequests-existing.FailedRequests),
+			InputTokens:     max64(0, row.InputTokens-existing.InputTokens),
+			OutputTokens:    max64(0, row.OutputTokens-existing.OutputTokens),
+			ReasoningTokens: max64(0, row.ReasoningTokens-existing.ReasoningTokens),
+			CachedTokens:    max64(0, row.CachedTokens-existing.CachedTokens),
+			TotalTokens:     max64(0, row.TotalTokens-existing.TotalTokens),
+			CostMicroUSD:    max64(0, row.CostMicroUSD-existing.CostMicroUSD),
+		}
+		if delta.Requests == 0 && delta.FailedRequests == 0 && delta.TotalTokens == 0 &&
+			delta.InputTokens == 0 && delta.OutputTokens == 0 && delta.ReasoningTokens == 0 &&
+			delta.CachedTokens == 0 && delta.CostMicroUSD == 0 {
+			continue
+		}
+		addDailyDeltaToSnapshot(&snapshot, delta)
+	}
+
+	return snapshot, nil
+}
+
+func (s *SQLiteStore) ImportUsageStatisticsSnapshot(ctx context.Context, snapshot internalusage.StatisticsSnapshot) (internalusage.MergeResult, error) {
+	result := internalusage.MergeResult{}
+	if s == nil || s.db == nil {
+		return result, fmt.Errorf("billing sqlite: not initialized")
+	}
+
+	current, err := s.BuildUsageStatisticsSnapshot(ctx)
+	if err != nil {
+		return result, err
+	}
+	seen := buildUsageSnapshotDedupSet(current)
+	pendingDaily := map[string]DailyUsageRow{}
+
+	for apiKey, apiSnapshot := range snapshot.APIs {
+		apiKey = strings.TrimSpace(apiKey)
+		if apiKey == "" {
+			continue
+		}
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			modelKey := policy.NormaliseModelKey(modelName)
+			if modelKey == "" {
+				modelKey = "unknown"
+			}
+			for _, detail := range modelSnapshot.Details {
+				normalized := normalizeSnapshotDetail(detail)
+				key := usageSnapshotDedupKey(apiKey, modelKey, normalized)
+				if _, exists := seen[key]; exists {
+					result.Skipped++
+					continue
+				}
+				seen[key] = struct{}{}
+
+				requestCount := usageSnapshotRequestCount(normalized)
+				successCount, failureCount := usageSnapshotOutcomeCounts(normalized)
+				dayKey := policy.DayKeyChina(normalized.Timestamp)
+				price, _, _, errPrice := s.ResolvePriceMicro(ctx, modelKey)
+				if errPrice != nil {
+					return result, errPrice
+				}
+				cost := calculateUsageCostMicro(
+					normalized.Tokens.InputTokens,
+					normalized.Tokens.OutputTokens,
+					normalized.Tokens.ReasoningTokens,
+					normalized.Tokens.CachedTokens,
+					price,
+				)
+				delta := DailyUsageRow{
+					APIKey:          apiKey,
+					Model:           modelKey,
+					Day:             dayKey,
+					Requests:        requestCount,
+					FailedRequests:  failureCount,
+					InputTokens:     max64(0, normalized.Tokens.InputTokens),
+					OutputTokens:    max64(0, normalized.Tokens.OutputTokens),
+					ReasoningTokens: max64(0, normalized.Tokens.ReasoningTokens),
+					CachedTokens:    max64(0, normalized.Tokens.CachedTokens),
+					TotalTokens:     max64(0, normalized.Tokens.TotalTokens),
+					CostMicroUSD:    max64(0, cost),
+				}
+
+				if requestCount == 1 && successCount+failureCount <= 1 {
+					if err := s.AddUsageEvent(ctx, UsageEventRow{
+						RequestedAt:     normalized.Timestamp.Unix(),
+						APIKey:          apiKey,
+						Source:          strings.TrimSpace(normalized.Source),
+						AuthIndex:       strings.TrimSpace(normalized.AuthIndex),
+						Model:           modelKey,
+						Failed:          failureCount > 0,
+						InputTokens:     delta.InputTokens,
+						OutputTokens:    delta.OutputTokens,
+						ReasoningTokens: delta.ReasoningTokens,
+						CachedTokens:    delta.CachedTokens,
+						TotalTokens:     delta.TotalTokens,
+						CostMicroUSD:    delta.CostMicroUSD,
+					}); err != nil {
+						return result, err
+					}
+				}
+
+				pendingKey := usageAggregateKey(apiKey, modelKey, dayKey)
+				acc := pendingDaily[pendingKey]
+				acc.APIKey = apiKey
+				acc.Model = modelKey
+				acc.Day = dayKey
+				acc.Requests += delta.Requests
+				acc.FailedRequests += delta.FailedRequests
+				acc.InputTokens += delta.InputTokens
+				acc.OutputTokens += delta.OutputTokens
+				acc.ReasoningTokens += delta.ReasoningTokens
+				acc.CachedTokens += delta.CachedTokens
+				acc.TotalTokens += delta.TotalTokens
+				acc.CostMicroUSD += delta.CostMicroUSD
+				pendingDaily[pendingKey] = acc
+				result.Added++
+			}
+		}
+	}
+
+	for _, delta := range pendingDaily {
+		if err := s.AddUsage(ctx, delta.APIKey, delta.Model, delta.Day, delta); err != nil {
+			return result, err
+		}
+	}
+
+	return result, nil
+}
+
 func (s *SQLiteStore) GetDailyUsageReport(ctx context.Context, apiKey, dayKey string) (DailyUsageReport, error) {
 	report := DailyUsageReport{
 		APIKey:          strings.TrimSpace(apiKey),
@@ -814,6 +991,180 @@ func historicalDetailTimestamp(day string) time.Time {
 		return time.Now().In(loc)
 	}
 	return parsed
+}
+
+func usageAggregateKey(apiKey, model, day string) string {
+	return strings.TrimSpace(apiKey) + "|" + policy.NormaliseModelKey(model) + "|" + strings.TrimSpace(day)
+}
+
+func addUsageEventToSnapshot(snapshot *internalusage.StatisticsSnapshot, row UsageEventRow) {
+	if snapshot == nil {
+		return
+	}
+	timestamp := time.Unix(row.RequestedAt, 0).In(policy.ChinaLocation())
+	detail := internalusage.RequestDetail{
+		Timestamp: timestamp,
+		Source:    strings.TrimSpace(row.Source),
+		AuthIndex: strings.TrimSpace(row.AuthIndex),
+		Tokens: internalusage.TokenStats{
+			InputTokens:     max64(0, row.InputTokens),
+			OutputTokens:    max64(0, row.OutputTokens),
+			ReasoningTokens: max64(0, row.ReasoningTokens),
+			CachedTokens:    max64(0, row.CachedTokens),
+			TotalTokens:     max64(0, row.TotalTokens),
+		},
+		Failed: row.Failed,
+	}
+	addSnapshotDetail(snapshot, strings.TrimSpace(row.APIKey), policy.NormaliseModelKey(row.Model), detail)
+}
+
+func addDailyDeltaToSnapshot(snapshot *internalusage.StatisticsSnapshot, row DailyUsageRow) {
+	if snapshot == nil {
+		return
+	}
+	successCount := max64(0, row.Requests-row.FailedRequests)
+	detail := internalusage.RequestDetail{
+		Timestamp: historicalDetailTimestamp(row.Day),
+		Source:    strings.TrimSpace(row.APIKey),
+		Tokens: internalusage.TokenStats{
+			InputTokens:     max64(0, row.InputTokens),
+			OutputTokens:    max64(0, row.OutputTokens),
+			ReasoningTokens: max64(0, row.ReasoningTokens),
+			CachedTokens:    max64(0, row.CachedTokens),
+			TotalTokens:     max64(0, row.TotalTokens),
+		},
+		Failed:       row.Requests > 0 && row.FailedRequests >= row.Requests,
+		RequestCount: max64(0, row.Requests),
+		SuccessCount: successCount,
+		FailureCount: max64(0, row.FailedRequests),
+	}
+	addSnapshotDetail(snapshot, strings.TrimSpace(row.APIKey), policy.NormaliseModelKey(row.Model), detail)
+}
+
+func addSnapshotDetail(snapshot *internalusage.StatisticsSnapshot, apiKey, model string, detail internalusage.RequestDetail) {
+	if snapshot == nil {
+		return
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return
+	}
+	model = policy.NormaliseModelKey(model)
+	if model == "" {
+		model = "unknown"
+	}
+	detail = normalizeSnapshotDetail(detail)
+	requestCount := usageSnapshotRequestCount(detail)
+	successCount, failureCount := usageSnapshotOutcomeCounts(detail)
+	totalTokens := max64(0, detail.Tokens.TotalTokens)
+
+	apiSnapshot := snapshot.APIs[apiKey]
+	if apiSnapshot.Models == nil {
+		apiSnapshot.Models = map[string]internalusage.ModelSnapshot{}
+	}
+	apiSnapshot.TotalRequests += requestCount
+	apiSnapshot.SuccessCount += successCount
+	apiSnapshot.FailureCount += failureCount
+	apiSnapshot.TotalTokens += totalTokens
+
+	modelSnapshot := apiSnapshot.Models[model]
+	modelSnapshot.TotalRequests += requestCount
+	modelSnapshot.SuccessCount += successCount
+	modelSnapshot.FailureCount += failureCount
+	modelSnapshot.TotalTokens += totalTokens
+	modelSnapshot.Details = append(modelSnapshot.Details, detail)
+	apiSnapshot.Models[model] = modelSnapshot
+	snapshot.APIs[apiKey] = apiSnapshot
+
+	dayKey := detail.Timestamp.In(policy.ChinaLocation()).Format("2006-01-02")
+	hourKey := detail.Timestamp.In(policy.ChinaLocation()).Format("15")
+	snapshot.TotalRequests += requestCount
+	snapshot.SuccessCount += successCount
+	snapshot.FailureCount += failureCount
+	snapshot.TotalTokens += totalTokens
+	snapshot.RequestsByDay[dayKey] += requestCount
+	snapshot.RequestsByHour[hourKey] += requestCount
+	snapshot.TokensByDay[dayKey] += totalTokens
+	snapshot.TokensByHour[hourKey] += totalTokens
+}
+
+func normalizeSnapshotDetail(detail internalusage.RequestDetail) internalusage.RequestDetail {
+	if detail.Timestamp.IsZero() {
+		detail.Timestamp = time.Now().In(policy.ChinaLocation())
+	}
+	detail.Timestamp = detail.Timestamp.In(policy.ChinaLocation())
+	detail.Tokens = normalizeSnapshotTokenStats(detail.Tokens)
+	return detail
+}
+
+func normalizeSnapshotTokenStats(tokens internalusage.TokenStats) internalusage.TokenStats {
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
+	}
+	if tokens.TotalTokens == 0 {
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+	}
+	tokens.InputTokens = max64(0, tokens.InputTokens)
+	tokens.OutputTokens = max64(0, tokens.OutputTokens)
+	tokens.ReasoningTokens = max64(0, tokens.ReasoningTokens)
+	tokens.CachedTokens = max64(0, tokens.CachedTokens)
+	tokens.TotalTokens = max64(0, tokens.TotalTokens)
+	return tokens
+}
+
+func usageSnapshotRequestCount(detail internalusage.RequestDetail) int64 {
+	if detail.RequestCount > 0 {
+		return detail.RequestCount
+	}
+	return 1
+}
+
+func usageSnapshotOutcomeCounts(detail internalusage.RequestDetail) (success int64, failure int64) {
+	if detail.SuccessCount > 0 || detail.FailureCount > 0 {
+		success = max64(0, detail.SuccessCount)
+		failure = max64(0, detail.FailureCount)
+		if success+failure == 0 {
+			return 1, 0
+		}
+		return success, failure
+	}
+	if detail.Failed {
+		return 0, usageSnapshotRequestCount(detail)
+	}
+	return usageSnapshotRequestCount(detail), 0
+}
+
+func buildUsageSnapshotDedupSet(snapshot internalusage.StatisticsSnapshot) map[string]struct{} {
+	seen := make(map[string]struct{})
+	for apiKey, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for _, detail := range modelSnapshot.Details {
+				seen[usageSnapshotDedupKey(apiKey, modelName, detail)] = struct{}{}
+			}
+		}
+	}
+	return seen
+}
+
+func usageSnapshotDedupKey(apiKey, model string, detail internalusage.RequestDetail) string {
+	detail = normalizeSnapshotDetail(detail)
+	return fmt.Sprintf(
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d|%d",
+		strings.TrimSpace(apiKey),
+		policy.NormaliseModelKey(model),
+		detail.Timestamp.UTC().Format(time.RFC3339Nano),
+		strings.TrimSpace(detail.Source),
+		strings.TrimSpace(detail.AuthIndex),
+		detail.Failed,
+		usageSnapshotRequestCount(detail),
+		max64(0, detail.SuccessCount),
+		max64(0, detail.FailureCount),
+		detail.Tokens.InputTokens,
+		detail.Tokens.OutputTokens,
+		detail.Tokens.ReasoningTokens,
+		detail.Tokens.CachedTokens,
+		detail.Tokens.TotalTokens,
+	)
 }
 
 func (s *SQLiteStore) recalculateUsageCosts(ctx context.Context, model string) error {
