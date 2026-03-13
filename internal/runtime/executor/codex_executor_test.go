@@ -177,6 +177,66 @@ func TestCodexExecutorStripsToolsDeferLoadingBeforeUpstream(t *testing.T) {
 	if gjson.GetBytes(got, "tools").Exists() && !gjson.GetBytes(got, "tools").IsArray() {
 		t.Fatalf("tools is not array after normalization: %s", gjson.GetBytes(got, "tools").Raw)
 	}
+	if gjson.GetBytes(got, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be removed for Codex upstream, got %s", string(got))
+	}
+}
+
+func TestCodexExecutorStripsToolChoiceForClaudeFailoverRequests(t *testing.T) {
+	var mu sync.Mutex
+	var seenBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		mu.Lock()
+		seenBody = b
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"}]}
+		],
+		"tools":[
+			{"name":"Bash","description":"Run shell commands","input_schema":{"type":"object","properties":{}}}
+		],
+		"tool_choice":{"type":"auto"}
+	}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]byte(nil), seenBody...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatalf("upstream body is empty")
+	}
+	if !gjson.GetBytes(got, "tools").IsArray() {
+		t.Fatalf("expected translated tools array, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "tool_choice").Exists() {
+		t.Fatalf("expected tool_choice to be removed for Claude failover, got %s", string(got))
+	}
 }
 
 func TestCodexExecutorDropsToolsForImageInputs(t *testing.T) {

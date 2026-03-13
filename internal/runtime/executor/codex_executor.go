@@ -118,6 +118,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
+	body = stripUnsupportedCodexFields(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -212,6 +213,7 @@ func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *clipro
 	}
 	compactBody = util.NormalizeOpenAIToolsPayload(compactBody)
 	compactBody = util.StripOpenAIToolsForImageInputs(compactBody)
+	compactBody = stripUnsupportedCodexFields(compactBody)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, compactBody)
@@ -312,6 +314,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
+	body = stripUnsupportedCodexFields(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -409,6 +412,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
+	body = stripUnsupportedCodexFields(body)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -516,6 +520,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
+	body = stripUnsupportedCodexFields(body)
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -691,6 +696,19 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+func stripUnsupportedCodexFields(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	out := body
+	// The Codex Responses upstream rejects tool_choice even when tools are present.
+	if updated, err := sjson.DeleteBytes(out, "tool_choice"); err == nil {
+		out = updated
+	}
+	return out
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {
