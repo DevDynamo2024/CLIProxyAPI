@@ -37,7 +37,7 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
-# Per-client API key policies (restrictions and daily limits).
+# Per-client API key policies (restrictions and usage quotas).
 # - excluded-models supports '*' wildcard matching and is case-insensitive.
 # - allow-claude-opus-4-6: when false, requests for claude-opus-4-6* are downgraded to claude-opus-4-5-20251101*.
 # - model-routing: optional deterministic time-window routing to a target model (e.g. split Claude -> Codex by hour).
@@ -45,6 +45,8 @@ api-keys:
 #   Supports model-specific rules to override the target based on the requested model (wildcards supported).
 #   (e.g. Claude weekly cap / rolling-window caps / account issues). Useful for automatically switching to Codex.
 # - daily-limits: request counts are tracked per day in China Standard Time (UTC+8).
+# - daily-budget-usd / weekly-budget-usd: spend quotas are tracked from persisted billing data.
+#   Weekly quota windows use China Standard Time (UTC+8), Monday 00:00 -> next Monday 00:00.
 # - Storage: daily counters are persisted in SQLite at APIKEY_POLICY_SQLITE_PATH (or a default path under the writable directory).
 api-key-policies:
   - api-key: "your-api-key-1"
@@ -78,6 +80,7 @@ api-key-policies:
           - from-model: "claude-sonnet-4-6*"
             target-model: "gpt-5.4(high)"
     allow-claude-opus-4-6: true
+    weekly-budget-usd: 400
     daily-limits:
       claude-opus-4-6: 10
 

@@ -233,6 +233,46 @@ func TestSQLiteStore_AddUsageAndDailyCost(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_GetCostMicroUSDByDayRange(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	apiKey := "k"
+	model := policy.NormaliseModelKey("claude-opus-4-5-20251101")
+
+	rows := []struct {
+		day  string
+		cost int64
+	}{
+		{day: "2026-03-09", cost: 120_000_000},
+		{day: "2026-03-12", cost: 80_000_000},
+		{day: "2026-03-16", cost: 50_000_000},
+	}
+	for _, row := range rows {
+		if err := store.AddUsage(ctx, apiKey, model, row.day, DailyUsageRow{
+			Requests:     1,
+			TotalTokens:  1,
+			CostMicroUSD: row.cost,
+		}); err != nil {
+			t.Fatalf("AddUsage(%s): %v", row.day, err)
+		}
+	}
+
+	total, err := store.GetCostMicroUSDByDayRange(ctx, apiKey, "2026-03-09", "2026-03-16")
+	if err != nil {
+		t.Fatalf("GetCostMicroUSDByDayRange: %v", err)
+	}
+	if total != 200_000_000 {
+		t.Fatalf("total=%d", total)
+	}
+}
+
 func TestSQLiteStore_RecalculateHistoricalCostsOnOpen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "billing.sqlite")

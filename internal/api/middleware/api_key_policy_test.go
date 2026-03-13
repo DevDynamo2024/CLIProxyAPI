@@ -124,12 +124,17 @@ func TestAPIKeyPolicyMiddleware_DailyLimit(t *testing.T) {
 }
 
 type stubCostReader struct {
-	cost int64
-	err  error
+	dailyCost  int64
+	weeklyCost int64
+	err        error
 }
 
 func (s stubCostReader) GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey string) (int64, error) {
-	return s.cost, s.err
+	return s.dailyCost, s.err
+}
+
+func (s stubCostReader) GetCostMicroUSDByDayRange(ctx context.Context, apiKey, startDay, endDayExclusive string) (int64, error) {
+	return s.weeklyCost, s.err
 }
 
 func TestAPIKeyPolicyMiddleware_DailyBudget(t *testing.T) {
@@ -141,7 +146,38 @@ func TestAPIKeyPolicyMiddleware_DailyBudget(t *testing.T) {
 	}
 	cfg.SanitizeAPIKeyPolicies()
 
-	reader := stubCostReader{cost: 10_000_000}
+	reader := stubCostReader{dailyCost: 10_000_000}
+	var _ billing.DailyCostReader = reader
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("apiKey", "k")
+		c.Next()
+	})
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, reader))
+	r.POST("/v1/chat/completions", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"claude-opus-4-5-20251101"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestAPIKeyPolicyMiddleware_WeeklyBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		APIKeyPolicies: []config.APIKeyPolicy{
+			{APIKey: "k", WeeklyBudgetUSD: 400},
+		},
+	}
+	cfg.SanitizeAPIKeyPolicies()
+
+	reader := stubCostReader{weeklyCost: 400_000_000}
 	var _ billing.DailyCostReader = reader
 
 	r := gin.New()

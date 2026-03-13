@@ -19,6 +19,7 @@ import (
 // DailyCostReader is the minimal interface needed by request-time middleware.
 type DailyCostReader interface {
 	GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey string) (int64, error)
+	GetCostMicroUSDByDayRange(ctx context.Context, apiKey, startDay, endDayExclusive string) (int64, error)
 }
 
 type SQLiteStore struct {
@@ -359,6 +360,28 @@ func (s *SQLiteStore) GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey s
 	var total int64
 	if err := row.Scan(&total); err != nil {
 		return 0, fmt.Errorf("billing sqlite: daily cost: %w", err)
+	}
+	return total, nil
+}
+
+func (s *SQLiteStore) GetCostMicroUSDByDayRange(ctx context.Context, apiKey, startDay, endDayExclusive string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("billing sqlite: not initialized")
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	startDay = strings.TrimSpace(startDay)
+	endDayExclusive = strings.TrimSpace(endDayExclusive)
+	if apiKey == "" || startDay == "" || endDayExclusive == "" {
+		return 0, fmt.Errorf("billing sqlite: invalid inputs")
+	}
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(cost_micro_usd), 0)
+		FROM api_key_model_daily_usage
+		WHERE api_key = ? AND day >= ? AND day < ?
+	`, apiKey, startDay, endDayExclusive)
+	var total int64
+	if err := row.Scan(&total); err != nil {
+		return 0, fmt.Errorf("billing sqlite: range cost: %w", err)
 	}
 	return total, nil
 }

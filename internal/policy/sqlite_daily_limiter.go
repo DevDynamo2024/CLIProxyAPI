@@ -23,6 +23,26 @@ func DayKeyChina(now time.Time) string {
 	return now.In(chinaLocation).Format("2006-01-02")
 }
 
+// ChinaLocation returns the fixed UTC+8 timezone used for policy windows.
+func ChinaLocation() *time.Location { return chinaLocation }
+
+// WeekBoundsChina returns the inclusive week start and exclusive next-week start
+// for the provided time in China Standard Time. Weeks start on Monday 00:00:00.
+func WeekBoundsChina(now time.Time) (start time.Time, end time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	local := now.In(chinaLocation)
+	start = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, chinaLocation)
+	weekday := int(start.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	start = start.AddDate(0, 0, -(weekday - 1))
+	end = start.AddDate(0, 0, 7)
+	return start, end
+}
+
 // SQLiteDailyLimiter provides atomic per-day counters keyed by (api_key, model, day).
 // It is used to enforce daily request limits that must survive process restarts.
 type SQLiteDailyLimiter struct {

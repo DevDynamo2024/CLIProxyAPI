@@ -44,3 +44,37 @@ func TestSQLiteDailyLimiter_Consume_Persists(t *testing.T) {
 		t.Fatalf("consume after reopen: allowed=%v err=%v", allowed, err)
 	}
 }
+
+func TestWeekBoundsChina_StartsOnMonday(t *testing.T) {
+	cases := []struct {
+		name      string
+		now       time.Time
+		wantStart string
+		wantEnd   string
+	}{
+		{
+			name:      "wednesday in china week",
+			now:       time.Date(2026, 3, 11, 12, 30, 0, 0, time.UTC),
+			wantStart: "2026-03-09 00:00:00",
+			wantEnd:   "2026-03-16 00:00:00",
+		},
+		{
+			name:      "sunday maps to prior monday",
+			now:       time.Date(2026, 3, 15, 14, 0, 0, 0, ChinaLocation()),
+			wantStart: "2026-03-09 00:00:00",
+			wantEnd:   "2026-03-16 00:00:00",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			start, end := WeekBoundsChina(tc.now)
+			if got := start.In(ChinaLocation()).Format("2006-01-02 15:04:05"); got != tc.wantStart {
+				t.Fatalf("start=%s want=%s", got, tc.wantStart)
+			}
+			if got := end.In(ChinaLocation()).Format("2006-01-02 15:04:05"); got != tc.wantEnd {
+				t.Fatalf("end=%s want=%s", got, tc.wantEnd)
+			}
+		})
+	}
+}

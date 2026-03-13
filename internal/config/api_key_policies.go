@@ -49,6 +49,11 @@ type APIKeyPolicy struct {
 	// DailyBudgetUSD defines the maximum daily spend (USD) allowed for this API key.
 	// Values <= 0 are treated as disabled.
 	DailyBudgetUSD float64 `yaml:"daily-budget-usd,omitempty" json:"daily-budget-usd,omitempty"`
+
+	// WeeklyBudgetUSD defines the maximum weekly spend (USD) allowed for this API key.
+	// Weeks are tracked in China Standard Time (UTC+8) starting Monday 00:00.
+	// Values <= 0 are treated as disabled.
+	WeeklyBudgetUSD float64 `yaml:"weekly-budget-usd,omitempty" json:"weekly-budget-usd,omitempty"`
 }
 
 // APIKeyModelRoutingPolicy groups model routing configuration for a client API key.
@@ -359,6 +364,9 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 
 		if entry.DailyBudgetUSD <= 0 {
 			entry.DailyBudgetUSD = 0
+		}
+		if entry.WeeklyBudgetUSD <= 0 {
+			entry.WeeklyBudgetUSD = 0
 		}
 
 		key := entry.APIKey

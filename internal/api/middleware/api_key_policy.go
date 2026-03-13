@@ -83,6 +83,36 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 			}
 		}
 
+		// 0.1) Weekly budget limits (USD) - based on persisted usage cost.
+		if policyEntry != nil && policyEntry.WeeklyBudgetUSD > 0 {
+			if costReader == nil {
+				body := handlers.BuildErrorResponseBody(http.StatusInternalServerError, "billing store unavailable")
+				c.Abort()
+				c.Data(http.StatusInternalServerError, "application/json", body)
+				return
+			}
+			start, end := policy.WeekBoundsChina(time.Now())
+			spentMicro, errSpent := costReader.GetCostMicroUSDByDayRange(
+				c.Request.Context(),
+				apiKey,
+				policy.DayKeyChina(start),
+				policy.DayKeyChina(end),
+			)
+			if errSpent != nil {
+				body := handlers.BuildErrorResponseBody(http.StatusInternalServerError, errSpent.Error())
+				c.Abort()
+				c.Data(http.StatusInternalServerError, "application/json", body)
+				return
+			}
+			budgetMicro := int64(math.Round(policyEntry.WeeklyBudgetUSD * 1_000_000))
+			if budgetMicro > 0 && spentMicro >= budgetMicro {
+				body := handlers.BuildErrorResponseBody(http.StatusTooManyRequests, "weekly budget exceeded")
+				c.Abort()
+				c.Data(http.StatusTooManyRequests, "application/json", body)
+				return
+			}
+		}
+
 		bodyBytes, err := io.ReadAll(c.Request.Body)
 		if err != nil {
 			c.Next()
