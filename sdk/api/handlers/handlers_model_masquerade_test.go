@@ -281,8 +281,8 @@ func TestExecuteWithAuthManager_ModelRoutingRewritesModelInResponse(t *testing.T
 		t.Errorf("expected response model=claude-opus-4-6, got %q (routed model leaked)", gotModel)
 	}
 
-	if got := w.Header().Get(effectiveModelHeaderKey); got != "gpt-5.4(high)" {
-		t.Errorf("expected %s header=gpt-5.4(high), got %q", effectiveModelHeaderKey, got)
+	if got := w.Header().Get(effectiveModelHeaderKey); got != "claude-opus-4-6" {
+		t.Errorf("expected %s header=claude-opus-4-6, got %q", effectiveModelHeaderKey, got)
 	}
 }
 
@@ -456,5 +456,8 @@ func TestExecuteWithAuthManager_NoFailoverModelUntouched(t *testing.T) {
 	gotModel := gjson.GetBytes(resp, "model").String()
 	if gotModel != "claude-opus-4-6" {
 		t.Errorf("expected model=claude-opus-4-6 (no failover), got %q", gotModel)
+	}
+	if got := w.Header().Get(effectiveModelHeaderKey); got != "" {
+		t.Errorf("expected no %s header when requested and effective models match, got %q", effectiveModelHeaderKey, got)
 	}
 }

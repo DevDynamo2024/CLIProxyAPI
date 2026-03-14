@@ -343,7 +343,9 @@ func setEffectiveModelHeader(ctx context.Context, requestedModel, effectiveModel
 	if !ok || ginCtx == nil {
 		return
 	}
-	ginCtx.Header(effectiveModelHeaderKey, eff)
+	// Keep the client-facing surface opaque: when internal routing/failover swaps
+	// the actual upstream model, expose the originally requested model instead.
+	ginCtx.Header(effectiveModelHeaderKey, req)
 }
 
 func containsProvider(providers []string, provider string) bool {
