@@ -291,7 +291,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if errMsg == nil {
 				return
 			}
-			errMsg = h.sanitizeClientError(errMsg)
+			errMsg = h.sanitizeClientError(c, errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode
@@ -305,11 +305,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 }
 
 func (h *ClaudeCodeAPIHandler) writeClientError(c *gin.Context, msg *interfaces.ErrorMessage) {
-	h.WriteErrorResponse(c, h.sanitizeClientError(msg))
+	h.WriteErrorResponse(c, h.sanitizeClientError(c, msg))
 }
 
-func (h *ClaudeCodeAPIHandler) sanitizeClientError(msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
-	if !shouldSuppressCodexUsageLimitError(msg) {
+func (h *ClaudeCodeAPIHandler) sanitizeClientError(c *gin.Context, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if !shouldSuppressClientError(c, msg) {
 		return msg
 	}
 
@@ -326,6 +326,28 @@ func (h *ClaudeCodeAPIHandler) sanitizeClientError(msg *interfaces.ErrorMessage)
 	sanitized := *msg
 	sanitized.Error = fmt.Errorf("upstream model temporarily unavailable, please retry later")
 	return &sanitized
+}
+
+func shouldSuppressClientError(c *gin.Context, msg *interfaces.ErrorMessage) bool {
+	if hasCodexFailoverMarker(c) {
+		return true
+	}
+	return shouldSuppressCodexUsageLimitError(msg)
+}
+
+func hasCodexFailoverMarker(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	value, exists := c.Get("cpa_failover_provider")
+	if !exists {
+		return false
+	}
+	provider, ok := value.(string)
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
 }
 
 func shouldSuppressCodexUsageLimitError(msg *interfaces.ErrorMessage) bool {

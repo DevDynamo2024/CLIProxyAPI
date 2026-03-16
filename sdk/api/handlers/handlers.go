@@ -51,6 +51,7 @@ type ErrorDetail struct {
 
 const idempotencyKeyMetadataKey = "idempotency_key"
 const effectiveModelHeaderKey = "X-CPA-Effective-Model"
+const failoverProviderContextKey = "cpa_failover_provider"
 
 const (
 	defaultStreamingKeepAliveSeconds = 0
@@ -346,6 +347,18 @@ func setEffectiveModelHeader(ctx context.Context, requestedModel, effectiveModel
 	// Keep the client-facing surface opaque: when internal routing/failover swaps
 	// the actual upstream model, expose the originally requested model instead.
 	ginCtx.Header(effectiveModelHeaderKey, req)
+}
+
+func markFailoverProvider(ctx context.Context, provider string) {
+	provider = strings.TrimSpace(strings.ToLower(provider))
+	if provider == "" || ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Set(failoverProviderContextKey, provider)
 }
 
 func containsProvider(providers []string, provider string) bool {
@@ -695,6 +708,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					markFailoverProvider(ctx, failoverProviders[0])
 					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					return nil, detailErr
@@ -791,6 +805,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 					"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
 				}).Warn("triggering automatic failover for Claude request")
 
+				markFailoverProvider(ctx, failoverProviders[0])
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
 					setEffectiveModelHeader(ctx, originalRequestedModel, failoverModel)
@@ -861,6 +876,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					markFailoverProvider(ctx, failoverProviders[0])
 					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					return nil, detailErr
@@ -942,6 +958,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				failoverOpts := opts
 				failoverOpts.OriginalRequest = failoverPayload
 				failoverOpts.Metadata = failoverReqMeta
+				markFailoverProvider(ctx, failoverProviders[0])
 				failoverOut, failoverErr := execOnce(failoverProviders, failoverReq, failoverOpts)
 				if failoverErr == nil {
 					setEffectiveModelHeader(ctx, originalRequestedModel, failoverModel)
@@ -1012,6 +1029,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					rawJSON = failoverPayload
 					providers = failoverProviders
 					normalizedModel = failoverModel
+					markFailoverProvider(ctx, failoverProviders[0])
 					setEffectiveModelHeader(ctx, originalRequestedModel, normalizedModel)
 				} else {
 					errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1113,6 +1131,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
 				}).Warn("triggering automatic failover for Claude streaming request")
 
+				markFailoverProvider(ctx, failoverProviders[0])
 				chunks, execErr = execStream(failoverProviders, failoverReq, failoverOpts)
 				if execErr != nil {
 					errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -1251,6 +1270,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 									"idempotency_key": reqMeta[idempotencyKeyMetadataKey],
 								}).Warn("triggering automatic failover for Claude streaming request (pre-first-byte)")
 
+								markFailoverProvider(ctx, failoverProviders[0])
 								retryChunks, retryExecErr := execStream(failoverProviders, failoverReq, failoverOpts)
 								if retryExecErr == nil {
 									// Swap state and restart outer loop on new chunks.
