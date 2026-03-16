@@ -245,6 +245,7 @@ func TestUsagePersistPlugin_PersistsWhenRequestContextCancelled(t *testing.T) {
 	defer store.Close()
 
 	plugin := NewUsagePersistPlugin(store)
+	store.SetPendingUsageProvider(plugin)
 	requestedAt := time.Date(2026, 3, 16, 12, 0, 0, 0, time.UTC)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -263,6 +264,9 @@ func TestUsagePersistPlugin_PersistsWhenRequestContextCancelled(t *testing.T) {
 			TotalTokens:  23,
 		},
 	})
+	if err := plugin.flushPending(context.Background()); err != nil {
+		t.Fatalf("flushPending: %v", err)
+	}
 
 	report, err := store.GetDailyUsageReport(context.Background(), "client-key", policy.DayKeyChina(requestedAt))
 	if err != nil {
@@ -287,6 +291,112 @@ func TestUsagePersistPlugin_PersistsWhenRequestContextCancelled(t *testing.T) {
 	}
 	if events[0].Model != policy.NormaliseModelKey("gpt-5.4") {
 		t.Fatalf("event model=%q", events[0].Model)
+	}
+}
+
+func TestUsagePersistPlugin_PendingUsageVisibleBeforeFlush(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	plugin := NewUsagePersistPlugin(store)
+	store.SetPendingUsageProvider(plugin)
+	defer store.Close()
+
+	requestedAt := time.Date(2026, 3, 16, 13, 0, 0, 0, time.UTC)
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		APIKey:      "client-key",
+		AuthIndex:   "auth-1",
+		Source:      "client-key",
+		RequestedAt: requestedAt,
+		Detail: coreusage.Detail{
+			InputTokens:  20,
+			OutputTokens: 10,
+			TotalTokens:  30,
+		},
+	})
+
+	dayKey := policy.DayKeyChina(requestedAt)
+	cost, err := store.GetDailyCostMicroUSD(context.Background(), "client-key", dayKey)
+	if err != nil {
+		t.Fatalf("GetDailyCostMicroUSD: %v", err)
+	}
+	if cost <= 0 {
+		t.Fatalf("pending daily cost=%d want>0", cost)
+	}
+
+	report, err := store.GetDailyUsageReport(context.Background(), "client-key", dayKey)
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport: %v", err)
+	}
+	if report.TotalRequests != 1 {
+		t.Fatalf("report total_requests=%d want=1", report.TotalRequests)
+	}
+	if report.TotalTokens != 30 {
+		t.Fatalf("report total_tokens=%d want=30", report.TotalTokens)
+	}
+
+	snapshot, err := store.BuildUsageStatisticsSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("BuildUsageStatisticsSnapshot: %v", err)
+	}
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("snapshot total_requests=%d want=1", snapshot.TotalRequests)
+	}
+	if snapshot.TotalTokens != 30 {
+		t.Fatalf("snapshot total_tokens=%d want=30", snapshot.TotalTokens)
+	}
+}
+
+func TestSQLiteStore_CloseFlushesPendingUsage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	plugin := NewUsagePersistPlugin(store)
+	store.SetPendingUsageProvider(plugin)
+
+	requestedAt := time.Date(2026, 3, 16, 14, 0, 0, 0, time.UTC)
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		APIKey:      "client-key",
+		AuthIndex:   "auth-1",
+		Source:      "client-key",
+		RequestedAt: requestedAt,
+		Detail: coreusage.Detail{
+			InputTokens:  11,
+			OutputTokens: 7,
+			TotalTokens:  18,
+		},
+	})
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	reopened, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(reopen): %v", err)
+	}
+	defer reopened.Close()
+
+	dayKey := policy.DayKeyChina(requestedAt)
+	report, err := reopened.GetDailyUsageReport(context.Background(), "client-key", dayKey)
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport: %v", err)
+	}
+	if report.TotalRequests != 1 {
+		t.Fatalf("TotalRequests=%d want=1", report.TotalRequests)
+	}
+	if report.TotalTokens != 18 {
+		t.Fatalf("TotalTokens=%d want=18", report.TotalTokens)
 	}
 }
 

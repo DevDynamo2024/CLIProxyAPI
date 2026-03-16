@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
@@ -26,6 +27,24 @@ type DailyCostReader interface {
 type SQLiteStore struct {
 	db   *sql.DB
 	path string
+
+	pendingMu       sync.RWMutex
+	pendingProvider pendingUsageProvider
+}
+
+type pendingUsageProvider interface {
+	Stop(ctx context.Context) error
+	PendingDailyCostMicroUSD(apiKey, dayKey string) int64
+	PendingDailyUsageRows(apiKey, dayKey string) []DailyUsageRow
+	PendingCostMicroUSDByDayRange(apiKey, startDay, endDayExclusive string) int64
+	PendingCostMicroUSDByTimeRange(apiKey string, startInclusive, endExclusive time.Time) int64
+	MergePendingSnapshot(snapshot *internalusage.StatisticsSnapshot)
+}
+
+type usagePersistRecord struct {
+	dayKey string
+	delta  DailyUsageRow
+	event  UsageEventRow
 }
 
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
@@ -73,10 +92,38 @@ func NewSQLiteStore(path string) (*SQLiteStore, error) {
 }
 
 func (s *SQLiteStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
+		return nil
+	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := provider.Stop(ctx); err != nil {
+			return err
+		}
+	}
+	if s.db == nil {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *SQLiteStore) SetPendingUsageProvider(provider pendingUsageProvider) {
+	if s == nil {
+		return
+	}
+	s.pendingMu.Lock()
+	s.pendingProvider = provider
+	s.pendingMu.Unlock()
+}
+
+func (s *SQLiteStore) getPendingUsageProvider() pendingUsageProvider {
+	if s == nil {
+		return nil
+	}
+	s.pendingMu.RLock()
+	defer s.pendingMu.RUnlock()
+	return s.pendingProvider
 }
 
 func (s *SQLiteStore) ensureSchema(ctx context.Context) error {
@@ -344,6 +391,49 @@ func (s *SQLiteStore) AddUsage(ctx context.Context, apiKey, model, dayKey string
 	return nil
 }
 
+func (s *SQLiteStore) addUsageExec(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, apiKey, model, dayKey string, delta DailyUsageRow, now int64) error {
+	if exec == nil {
+		return fmt.Errorf("billing sqlite: executor is required")
+	}
+	apiKey = strings.TrimSpace(apiKey)
+	modelKey := policy.NormaliseModelKey(model)
+	dayKey = strings.TrimSpace(dayKey)
+	if apiKey == "" || modelKey == "" || dayKey == "" {
+		return fmt.Errorf("billing sqlite: invalid inputs")
+	}
+	if delta.Requests < 0 || delta.FailedRequests < 0 {
+		return fmt.Errorf("billing sqlite: invalid request deltas")
+	}
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO api_key_model_daily_usage (
+			api_key, model, day,
+			requests, failed_requests,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			cost_micro_usd, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(api_key, model, day) DO UPDATE SET
+			requests = requests + excluded.requests,
+			failed_requests = failed_requests + excluded.failed_requests,
+			input_tokens = input_tokens + excluded.input_tokens,
+			output_tokens = output_tokens + excluded.output_tokens,
+			reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
+			cached_tokens = cached_tokens + excluded.cached_tokens,
+			total_tokens = total_tokens + excluded.total_tokens,
+			cost_micro_usd = cost_micro_usd + excluded.cost_micro_usd,
+			updated_at = excluded.updated_at
+	`, apiKey, modelKey, dayKey,
+		max64(0, delta.Requests), max64(0, delta.FailedRequests),
+		max64(0, delta.InputTokens), max64(0, delta.OutputTokens), max64(0, delta.ReasoningTokens), max64(0, delta.CachedTokens), max64(0, delta.TotalTokens),
+		max64(0, delta.CostMicroUSD), now,
+	)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: add usage: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey string) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("billing sqlite: not initialized")
@@ -361,6 +451,9 @@ func (s *SQLiteStore) GetDailyCostMicroUSD(ctx context.Context, apiKey, dayKey s
 	var total int64
 	if err := row.Scan(&total); err != nil {
 		return 0, fmt.Errorf("billing sqlite: daily cost: %w", err)
+	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		total += provider.PendingDailyCostMicroUSD(apiKey, dayKey)
 	}
 	return total, nil
 }
@@ -384,6 +477,9 @@ func (s *SQLiteStore) GetCostMicroUSDByDayRange(ctx context.Context, apiKey, sta
 	if err := row.Scan(&total); err != nil {
 		return 0, fmt.Errorf("billing sqlite: range cost: %w", err)
 	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		total += provider.PendingCostMicroUSDByDayRange(apiKey, startDay, endDayExclusive)
+	}
 	return total, nil
 }
 
@@ -403,6 +499,9 @@ func (s *SQLiteStore) GetCostMicroUSDByTimeRange(ctx context.Context, apiKey str
 	var total int64
 	if err := row.Scan(&total); err != nil {
 		return 0, fmt.Errorf("billing sqlite: time range cost: %w", err)
+	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		total += provider.PendingCostMicroUSDByTimeRange(apiKey, startInclusive, endExclusive)
 	}
 	return total, nil
 }
@@ -472,6 +571,9 @@ func (s *SQLiteStore) BuildUsageStatisticsSnapshot(ctx context.Context) (interna
 			continue
 		}
 		addDailyDeltaToSnapshot(&snapshot, delta)
+	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		provider.MergePendingSnapshot(&snapshot)
 	}
 
 	return snapshot, nil
@@ -631,6 +733,35 @@ func (s *SQLiteStore) GetDailyUsageReport(ctx context.Context, apiKey, dayKey st
 	if err := rows.Err(); err != nil {
 		return report, fmt.Errorf("billing sqlite: daily usage rows: %w", err)
 	}
+	if provider := s.getPendingUsageProvider(); provider != nil {
+		modelIndex := make(map[string]int, len(report.Models))
+		for i, row := range report.Models {
+			modelIndex[row.Model] = i
+		}
+		for _, row := range provider.PendingDailyUsageRows(report.APIKey, report.Day) {
+			report.TotalCostMicro += row.CostMicroUSD
+			report.TotalRequests += row.Requests
+			report.TotalFailed += row.FailedRequests
+			report.TotalTokens += row.TotalTokens
+			if idx, ok := modelIndex[row.Model]; ok {
+				report.Models[idx].Requests += row.Requests
+				report.Models[idx].FailedRequests += row.FailedRequests
+				report.Models[idx].InputTokens += row.InputTokens
+				report.Models[idx].OutputTokens += row.OutputTokens
+				report.Models[idx].ReasoningTokens += row.ReasoningTokens
+				report.Models[idx].CachedTokens += row.CachedTokens
+				report.Models[idx].TotalTokens += row.TotalTokens
+				report.Models[idx].CostMicroUSD += row.CostMicroUSD
+				if row.UpdatedAt > report.Models[idx].UpdatedAt {
+					report.Models[idx].UpdatedAt = row.UpdatedAt
+				}
+				continue
+			}
+			modelIndex[row.Model] = len(report.Models)
+			report.Models = append(report.Models, row)
+		}
+		sort.Slice(report.Models, func(i, j int) bool { return report.Models[i].Model < report.Models[j].Model })
+	}
 	report.TotalCostUSD = microUSDToUSD(report.TotalCostMicro)
 	return report, nil
 }
@@ -674,6 +805,82 @@ func (s *SQLiteStore) AddUsageEvent(ctx context.Context, event UsageEventRow) er
 	if err != nil {
 		return fmt.Errorf("billing sqlite: add usage event: %w", err)
 	}
+	return nil
+}
+
+func (s *SQLiteStore) addUsageEventExec(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, event UsageEventRow, now int64) error {
+	if exec == nil {
+		return fmt.Errorf("billing sqlite: executor is required")
+	}
+	if event.RequestedAt <= 0 {
+		return fmt.Errorf("billing sqlite: requested_at is required")
+	}
+	if strings.TrimSpace(event.APIKey) == "" {
+		return fmt.Errorf("billing sqlite: api_key is required")
+	}
+	modelKey := policy.NormaliseModelKey(event.Model)
+	if modelKey == "" {
+		return fmt.Errorf("billing sqlite: model is required")
+	}
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO usage_events (
+			requested_at, api_key, source, auth_index, model, failed,
+			input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			cost_micro_usd, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		event.RequestedAt,
+		strings.TrimSpace(event.APIKey),
+		strings.TrimSpace(event.Source),
+		strings.TrimSpace(event.AuthIndex),
+		modelKey,
+		boolToSQLiteInt(event.Failed),
+		max64(0, event.InputTokens),
+		max64(0, event.OutputTokens),
+		max64(0, event.ReasoningTokens),
+		max64(0, event.CachedTokens),
+		max64(0, event.TotalTokens),
+		max64(0, event.CostMicroUSD),
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: add usage event: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) AddUsageBatch(ctx context.Context, batch []usagePersistRecord) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("billing sqlite: not initialized")
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("billing sqlite: begin usage batch: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	now := nowUnixUTC()
+	for _, item := range batch {
+		if err := s.addUsageExec(ctx, tx, item.delta.APIKey, item.delta.Model, item.dayKey, item.delta, now); err != nil {
+			return err
+		}
+		if err := s.addUsageEventExec(ctx, tx, item.event, now); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("billing sqlite: commit usage batch: %w", err)
+	}
+	committed = true
 	return nil
 }
 

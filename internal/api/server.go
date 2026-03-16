@@ -255,7 +255,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.dailyLimiter = s.initDailyLimiter(configFilePath)
 	s.billingStore = s.initBillingStore(configFilePath)
 	if s.billingStore != nil {
-		coreusage.RegisterPlugin(billing.NewUsagePersistPlugin(s.billingStore))
+		plugin := billing.NewUsagePersistPlugin(s.billingStore)
+		s.billingStore.SetPendingUsageProvider(plugin)
+		coreusage.RegisterPlugin(plugin)
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -969,6 +971,13 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
+	// Shutdown the HTTP server.
+	if err := s.server.Shutdown(ctx); err != nil {
+		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	}
+
+	coreusage.StopDefault()
+
 	if s.dailyLimiter != nil {
 		if err := s.dailyLimiter.Close(); err != nil {
 			log.WithError(err).Warn("failed to close api key policy daily limiter")
@@ -978,11 +987,6 @@ func (s *Server) Stop(ctx context.Context) error {
 		if err := s.billingStore.Close(); err != nil {
 			log.WithError(err).Warn("failed to close billing store")
 		}
-	}
-
-	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
 	}
 
 	log.Debug("API server stopped")
