@@ -7,9 +7,13 @@ import (
 )
 
 const (
-	claudeOpus46Prefix          = "claude-opus-4-6"
-	claudeOpus45FallbackPrefix  = "claude-opus-4-5-20251101"
-	claudeThinkingSuffixLiteral = "-thinking"
+	claudeModelPrefix            = "claude-"
+	claudeOpusPrefix             = "claude-opus-"
+	claudeOpus46Prefix           = "claude-opus-4-6"
+	claudeOpus45FallbackPrefix   = "claude-opus-4-5-20251101"
+	claudeThinkingSuffixLiteral  = "-thinking"
+	defaultClaudeGPTHighTarget   = "gpt-5.4(high)"
+	defaultClaudeGPTMediumTarget = "gpt-5.4(medium)"
 )
 
 // NormaliseModelKey returns a lowercased model name without thinking budget suffix "(...)".
@@ -48,6 +52,24 @@ func DowngradeClaudeOpus46(model string) (string, bool) {
 // IsClaudeOpus46 returns true when the model name (after stripping "(...)") starts with claude-opus-4-6.
 func IsClaudeOpus46(model string) bool {
 	return strings.HasPrefix(NormaliseModelKey(model), claudeOpus46Prefix)
+}
+
+// IsClaudeModel returns true when the model name (after stripping "(...)") starts with claude-.
+func IsClaudeModel(model string) bool {
+	return strings.HasPrefix(NormaliseModelKey(model), claudeModelPrefix)
+}
+
+// DefaultClaudeGPTTarget maps Claude requests to the default GPT target used by
+// the global Claude -> GPT routing feature.
+func DefaultClaudeGPTTarget(model string) (string, bool) {
+	key := NormaliseModelKey(model)
+	if !strings.HasPrefix(key, claudeModelPrefix) {
+		return "", false
+	}
+	if strings.HasPrefix(key, claudeOpusPrefix) {
+		return defaultClaudeGPTHighTarget, true
+	}
+	return defaultClaudeGPTMediumTarget, true
 }
 
 // MatchWildcard performs case-insensitive matching where '*' matches any substring.

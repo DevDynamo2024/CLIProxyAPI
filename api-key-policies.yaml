@@ -3,79 +3,85 @@ api-key-policies:
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-BFSbzN4C9IUdnY0HzhNJK5nqTAA21AVmU5lp26YgmIQMN
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-JwmY5ESOt873J6q4IoQ1pAgJEupsLINzt47XPjxMSvpiP
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-0y3BIir5s2bWpwjWvbsQHGCD1RhuqexYntGzhOlxc1WRd
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
+        rules:
+          - from-model: claude-opus-4-6*
+            target-model: gpt-5.4(high)
     allow-claude-opus-4-6: true
   - api-key: sk-OIs5NEfHDJQYYsSe1p6cLUDDkAM95T1mly9OnGp98eP0p
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-UnEbF8RQ0h2JnffJKEjxKxJKH5ZAiztrNFHZTbuOP5jTN
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-eHOSf8gQovBmzlY4nOUardwbJV3uc5mT9MBAEWs88641A
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
+        rules:
+          - from-model: claude-opus-4-6*
+            target-model: gpt-5.4(high)
     allow-claude-opus-4-6: true
   - api-key: sk-reqRnZxEDjvy8OwDAL4pQA1CsoL9wmIZbYIsYd0nY1uaK
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
     model-routing:
       rules:
@@ -88,126 +94,129 @@ api-key-policies:
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-NOg1MT2WBZsdKeFsrEY7H4PFkS43jrATPZ7JYVuvYTPD0
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-mhgwGvEK9gSVRJgbbIrZLfzVkGWSfNjvl92UGBucUi2TR
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-2yyQye1KomyrWUxVJZmPF5zIkvLKcavNE83xJR8saaydy
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-WqKrDEYhC2GPDgNvGhIMJzcEoWnqlOgnb5CJ3eaSJxCrh
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-CuUAF5kzHuQ7pLfSibTiCT8WPdHPtYfMwmA774SiNjawJ
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-94fWPXZzSavu1e6pxsBdurytMRq01yJmc0cvnNWeorL1c
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-eSlx9AvmyacslRPVlRIa1cFeaNN18KltBISAF86ddsOde
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-WZExwEyVOYEvaf2XYE0IQ1mDE0p6YWMTdYRRRy9IRjfwY
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
+        rules:
+          - from-model: claude-opus-4-6*
+            target-model: gpt-5.4(high)
     allow-claude-opus-4-6: true
   - api-key: sk-qHTfFRjOcNZrTapf5SLRrTX4TpNyrLYmBnHpxrnMPeHkh
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-920x1ySC0HC999Z0m3XMiSSplOXrRZwOQZDZoAxysDhzp
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true
   - api-key: sk-GtBICOpDEMBX4TpQ9Bhm7XrjMeMkD6T98ALf59OZEfq7N
     failover:
       claude:
         enabled: true
-        target-model: gpt-5.4(high)
+        target-model: gpt-5.4(medium)
         rules:
           - from-model: claude-opus-4-6*
             target-model: gpt-5.4(high)
           - from-model: claude-sonnet-4-6*
-            target-model: gpt-5.4(high)
+            target-model: gpt-5.4(medium)
     allow-claude-opus-4-6: true

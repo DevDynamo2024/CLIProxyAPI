@@ -42,6 +42,8 @@ func setupUsageDBRouter(h *management.Handler) *gin.Engine {
 		mgmt.GET("/usage", h.GetUsageStatistics)
 		mgmt.GET("/usage/export", h.ExportUsageStatistics)
 		mgmt.POST("/usage/import", h.ImportUsageStatistics)
+		mgmt.GET("/model-prices/export", h.ExportModelPrices)
+		mgmt.POST("/model-prices/import", h.ImportModelPrices)
 	}
 	return r
 }
@@ -148,5 +150,79 @@ func TestUsageManagement_ExportImport_UsesDatabase(t *testing.T) {
 	}
 	if got := int64(result["skipped"].(float64)); got != 1 {
 		t.Fatalf("skipped=%d", got)
+	}
+}
+
+func TestUsageManagement_ModelPricesExportImport_UsesDatabase(t *testing.T) {
+	h, store := newUsageDBTestHandler(t)
+	defer store.Close()
+	r := setupUsageDBRouter(h)
+
+	if err := store.UpsertModelPrice(t.Context(), "custom-model", billing.PriceMicroUSDPer1M{
+		Prompt:     billing.USDPer1MToMicroUSDPer1M(1.25),
+		Completion: billing.USDPer1MToMicroUSDPer1M(2.5),
+		Cached:     billing.USDPer1MToMicroUSDPer1M(0.5),
+	}); err != nil {
+		t.Fatalf("UpsertModelPrice: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/model-prices/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("export status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var exported struct {
+		Version int                  `json:"version"`
+		Prices  []billing.ModelPrice `json:"prices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &exported); err != nil {
+		t.Fatalf("unmarshal export: %v", err)
+	}
+	if exported.Version != 1 {
+		t.Fatalf("version=%d", exported.Version)
+	}
+	if len(exported.Prices) == 0 {
+		t.Fatal("expected exported prices")
+	}
+	foundExported := false
+	for _, price := range exported.Prices {
+		if price.Model == "custom-model" {
+			foundExported = true
+			break
+		}
+	}
+	if !foundExported {
+		t.Fatal("custom model price missing from export")
+	}
+
+	freshHandler, freshStore := newUsageDBTestHandler(t)
+	defer freshStore.Close()
+	freshRouter := setupUsageDBRouter(freshHandler)
+
+	req = httptest.NewRequest(http.MethodPost, "/v0/management/model-prices/import", bytes.NewReader(w.Body.Bytes()))
+	req.Header.Set("Content-Type", "application/json")
+	importRecorder := httptest.NewRecorder()
+	freshRouter.ServeHTTP(importRecorder, req)
+	if importRecorder.Code != http.StatusOK {
+		t.Fatalf("import status=%d body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+
+	prices, err := freshStore.ListModelPrices(t.Context())
+	if err != nil {
+		t.Fatalf("ListModelPrices: %v", err)
+	}
+	found := false
+	for _, price := range prices {
+		if price.Model == "custom-model" {
+			found = true
+			if price.PromptUSDPer1M != 1.25 || price.CompletionUSDPer1M != 2.5 || price.CachedUSDPer1M != 0.5 {
+				t.Fatalf("unexpected price: %+v", price)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("custom saved model price not imported")
 	}
 }

@@ -67,18 +67,18 @@ api-key-policies:
           sticky-window-seconds: 3600
         - enabled: true
           from-model: "claude-sonnet-4-6*"
-          target-model: "gpt-5.4(high)"
+          target-model: "gpt-5.4(medium)"
           target-percent: 50
           sticky-window-seconds: 3600
     failover:
       claude:
         enabled: true
-        target-model: "gpt-5.4(high)" # default fallback when no rules match
+        target-model: "gpt-5.4(medium)" # default fallback when no rules match
         rules:
           - from-model: "claude-opus-4-6*"
             target-model: "gpt-5.4(high)"
           - from-model: "claude-sonnet-4-6*"
-            target-model: "gpt-5.4(high)"
+            target-model: "gpt-5.4(medium)"
     allow-claude-opus-4-6: true
     weekly-budget-usd: 400
     daily-limits:

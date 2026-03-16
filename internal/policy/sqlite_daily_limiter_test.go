@@ -78,3 +78,17 @@ func TestWeekBoundsChina_StartsOnMonday(t *testing.T) {
 		})
 	}
 }
+
+func TestAnchoredWindowBounds_UsesAnchorHour(t *testing.T) {
+	anchor, ok := ParseHourlyAnchorRFC3339("2026-03-15T10:37:00+08:00")
+	if !ok {
+		t.Fatal("expected anchor to parse")
+	}
+	start, end := AnchoredWindowBounds(anchor, time.Date(2026, 3, 18, 12, 0, 0, 0, ChinaLocation()), 7*24*time.Hour)
+	if got := start.Format(time.RFC3339); got != "2026-03-15T10:00:00+08:00" {
+		t.Fatalf("start=%s", got)
+	}
+	if got := end.Format(time.RFC3339); got != "2026-03-22T10:00:00+08:00" {
+		t.Fatalf("end=%s", got)
+	}
+}

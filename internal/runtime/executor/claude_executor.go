@@ -271,6 +271,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	} else {
 		reporter.publish(ctx, parseClaudeUsage(data))
 	}
+	reporter.ensurePublished(ctx)
 	if isClaudeOAuthToken(apiKey) {
 		data = stripClaudeToolPrefixFromResponse(data, claudeToolPrefix)
 	}
@@ -461,6 +462,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: errScan}
 			}
+			reporter.ensurePublished(ctx)
 			return
 		}
 
@@ -496,6 +498,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
+		reporter.ensurePublished(ctx)
 	}()
 	return stream, nil
 }

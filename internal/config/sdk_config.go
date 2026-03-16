@@ -9,6 +9,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// ClaudeToGPTRoutingEnabled forces Claude model requests from client API keys
+	// to route to GPT targets unless the API key policy explicitly enables Claude models.
+	ClaudeToGPTRoutingEnabled bool `yaml:"claude-to-gpt-routing-enabled" json:"claude-to-gpt-routing-enabled"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

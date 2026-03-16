@@ -7,6 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 type UsagePersistPlugin struct {
@@ -44,9 +45,16 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		detail.TotalTokens = 0
 	}
 
-	price, _, _, err := p.store.ResolvePriceMicro(ctx, modelKey)
+	price, priceSource, _, err := p.store.ResolvePriceMicro(ctx, modelKey)
 	if err != nil {
 		return
+	}
+	if priceSource == "missing" {
+		log.WithFields(log.Fields{
+			"component": "billing",
+			"api_key":   apiKey,
+			"model":     modelKey,
+		}).Warn("billing price missing for usage record; request will be tracked with zero cost")
 	}
 	cost := calculateUsageCostMicro(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens, detail.CachedTokens, price)
 

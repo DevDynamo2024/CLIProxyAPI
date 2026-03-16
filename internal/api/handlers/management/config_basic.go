@@ -280,6 +280,14 @@ func (h *Handler) PutForceModelPrefix(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ForceModelPrefix = v })
 }
 
+// ClaudeToGPTRoutingEnabled
+func (h *Handler) GetClaudeToGPTRoutingEnabled(c *gin.Context) {
+	c.JSON(200, gin.H{"claude-to-gpt-routing-enabled": h.cfg.ClaudeToGPTRoutingEnabled})
+}
+func (h *Handler) PutClaudeToGPTRoutingEnabled(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.ClaudeToGPTRoutingEnabled = v })
+}
+
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {

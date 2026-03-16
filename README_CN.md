@@ -83,6 +83,98 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
 - 自定义 Provider 示例：`examples/custom-provider`
 
+## API Key 策略与数据迁移
+
+### 周限额与时间窗口
+
+- `每日次数上限` 继续按 `UTC+8` 自然日统计。
+- `每日成本上限` 按 `UTC+8` 自然日统计。
+- `每周成本上限` 现在支持通过 `weekly-budget-anchor-at` 指定起始时间。
+- 当设置了 `weekly-budget-anchor-at` 后，周预算窗口不再固定按“周一 00:00 到下周一 00:00”，而是从该时间开始，按连续 `168` 小时计算。
+- 管理中心默认会把“每周预算开始时间”设为当前整点，也可以手动指定到小时。
+- 如果未设置 `weekly-budget-anchor-at`，服务端仍兼容旧逻辑，按 `UTC+8` 周一 `00:00` 起算。
+
+示例：
+
+- `weekly-budget-anchor-at: 2026-03-15T10:00:00+08:00`
+- 当前周预算窗口为 `2026-03-15 10:00 ~ 2026-03-22 10:00`
+
+### “最近 7 小时”用量为何会变化
+
+- 管理中心中的 `最近 7 小时` 是滚动时间窗口，不是固定分桶。
+- 例如：
+  - `10:00` 查看时，窗口是 `03:00 ~ 10:00`
+  - `10:40` 再查看时，窗口会变成 `03:40 ~ 10:40`
+- 因此，即使中间没有新请求，只要早先的一部分请求被滚出窗口，价格和请求数也会发生变化。
+
+### SQLite 存储位置
+
+CLIProxyAPI 目前使用同一份 SQLite 文件同时保存以下数据：
+
+- API Key 每日次数限额计数
+- API Key billing / usage 历史数据
+- 模型价格表（`model_prices`）
+
+SQLite 路径解析规则如下：
+
+1. 优先使用环境变量 `APIKEY_POLICY_SQLITE_PATH`
+2. 否则使用 `WRITABLE_PATH/api_key_policy_limits.sqlite`
+3. 如果 `WRITABLE_PATH` 未设置，则回退到配置文件目录下的 `api_key_policy_limits.sqlite`
+
+Docker Compose 默认路径通常是：
+
+- `/CLIProxyAPI/data/api_key_policy_limits.sqlite`
+
+### 模型价格保存在哪里
+
+- 模型价格保存在同一个 SQLite 文件中的 `model_prices` 表。
+- 该表不仅保存手工维护的价格，也会保存当前服务端同步后的持久化价格数据。
+- 因此，直接迁移这份 SQLite 文件，通常就能同时迁走 usage、限额计数和模型价格。
+
+### 迁移到另一台机器
+
+最稳妥的方式是停机后直接复制 SQLite 文件。
+
+#### 方式一：停机迁移，推荐
+
+1. 停止旧机器上的 CLIProxyAPI
+2. 复制以下文件到新机器相同路径
+3. 启动新机器上的 CLIProxyAPI
+
+需要复制的文件：
+
+- `api_key_policy_limits.sqlite`
+- `api_key_policy_limits.sqlite-wal`（如果存在）
+- `api_key_policy_limits.sqlite-shm`（如果存在）
+
+这种方式会一并迁移：
+
+- API Key 次数限额已消费计数
+- usage / billing 历史
+- 模型价格数据
+- 周预算和日预算判断所依赖的数据
+
+#### 方式二：不停机迁移
+
+如果旧机器不能停机，不建议直接复制正在写入中的 SQLite 主文件。此时应改用管理接口导出/导入：
+
+- usage 导出：`GET /v0/management/usage/export`
+- usage 导入：`POST /v0/management/usage/import`
+- model prices 导出：`GET /v0/management/model-prices/export`
+- model prices 导入：`POST /v0/management/model-prices/import`
+
+说明：
+
+- `usage export/import` 用于迁移用量与 billing 快照
+- `model-prices export/import` 用于迁移当前持久化模型价格表
+- 如果你还想保留“每日次数限额已经消耗到哪里”的状态，仍然建议直接迁移整份 SQLite 文件
+
+### 建议
+
+- 单机、单实例、少量 API Key 场景下，继续使用 SQLite 即可
+- 当你需要多实例共享同一套预算与 usage 数据时，再考虑切换到 PostgreSQL
+- 对于当前大约几十个 API Key 的规模，优先保证配置语义清晰和迁移流程简单，收益高于过早引入更重的数据库
+
 ## 贡献
 
 欢迎贡献！请随时提交 Pull Request。

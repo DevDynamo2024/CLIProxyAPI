@@ -42,6 +42,15 @@ func TestRewriteResponseModelFields_MessageModel(t *testing.T) {
 	}
 }
 
+func TestRewriteResponseModelFields_ResponsesEnvelopeModel(t *testing.T) {
+	input := []byte(`{"type":"response.created","response":{"model":"gpt-5.4","status":"in_progress"}}`)
+	result := rewriteResponseModelFields(input, "claude-opus-4-6")
+
+	if got := gjson.GetBytes(result, "response.model").String(); got != "claude-opus-4-6" {
+		t.Errorf("expected response.model=claude-opus-4-6, got %q", got)
+	}
+}
+
 func TestRewriteResponseModelFields_BothPaths(t *testing.T) {
 	// a response that has both top-level and nested model (unlikely but tests both paths)
 	input := []byte(`{"model":"gpt-5.2","message":{"model":"gpt-5.2"}}`)
@@ -125,6 +134,16 @@ func TestRewriteStreamChunkModelFields_SSEMultipleEvents(t *testing.T) {
 	// second event should be untouched (no model field)
 	if !bytes.Contains(result, []byte(`"text":"hi"`)) {
 		t.Errorf("expected second event preserved, got %s", string(result))
+	}
+}
+
+func TestRewriteStreamChunkModelFields_SSEResponsesEnvelopeModel(t *testing.T) {
+	input := []byte("data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n")
+	result := rewriteStreamChunkModelFields(input, "claude-opus-4-6")
+
+	jsonData := bytes.TrimPrefix(bytes.Split(result, []byte("\n"))[0], []byte("data: "))
+	if got := gjson.GetBytes(jsonData, "response.model").String(); got != "claude-opus-4-6" {
+		t.Errorf("expected response.model=claude-opus-4-6 in SSE, got %q", got)
 	}
 }
 

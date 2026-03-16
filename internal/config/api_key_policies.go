@@ -13,6 +13,10 @@ import (
 type APIKeyPolicy struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// EnableClaudeModels disables the global Claude -> GPT routing override for this API key.
+	// It only takes effect when claude-to-gpt-routing-enabled is true.
+	EnableClaudeModels *bool `yaml:"enable-claude-models,omitempty" json:"enable-claude-models,omitempty"`
+
 	// UpstreamBaseURL overrides the upstream API base URL for this client API key.
 	// When set, /v1/* requests will be transparently proxied to this base URL instead of
 	// routing to the configured providers in this server. This is useful for chaining
@@ -54,6 +58,11 @@ type APIKeyPolicy struct {
 	// Weeks are tracked in China Standard Time (UTC+8) starting Monday 00:00.
 	// Values <= 0 are treated as disabled.
 	WeeklyBudgetUSD float64 `yaml:"weekly-budget-usd,omitempty" json:"weekly-budget-usd,omitempty"`
+
+	// WeeklyBudgetAnchorAt optionally switches weekly budgeting to anchored 168-hour windows.
+	// The value is stored as RFC3339 and normalized to hour precision during sanitization.
+	// When empty, the legacy Monday 00:00 (UTC+8) calendar-week window is used.
+	WeeklyBudgetAnchorAt string `yaml:"weekly-budget-anchor-at,omitempty" json:"weekly-budget-anchor-at,omitempty"`
 }
 
 // APIKeyModelRoutingPolicy groups model routing configuration for a client API key.
@@ -92,7 +101,7 @@ type ProviderFailoverPolicy struct {
 	// Enabled toggles failover behaviour for the provider.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 
-	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.4(high)").
+	// TargetModel is the model ID to retry when failover triggers (e.g. "gpt-5.4(medium)").
 	TargetModel string `yaml:"target-model,omitempty" json:"target-model,omitempty"`
 
 	// Rules optionally override the target model based on the requested model.
@@ -216,6 +225,26 @@ func (p *APIKeyPolicy) AllowsClaudeOpus46() bool {
 	return *p.AllowClaudeOpus46
 }
 
+func (p *APIKeyPolicy) ClaudeModelsEnabled() bool {
+	if p == nil || p.EnableClaudeModels == nil {
+		return false
+	}
+	return *p.EnableClaudeModels
+}
+
+// WeeklyBudgetBounds resolves the active weekly budget window for the policy.
+// When WeeklyBudgetAnchorAt is unset or invalid, it falls back to the legacy
+// Monday 00:00 -> next Monday 00:00 China-time window.
+func (p *APIKeyPolicy) WeeklyBudgetBounds(now time.Time) (time.Time, time.Time) {
+	if p == nil {
+		return policy.WeekBoundsChina(now)
+	}
+	if anchor, ok := policy.ParseHourlyAnchorRFC3339(p.WeeklyBudgetAnchorAt); ok {
+		return policy.AnchoredWindowBounds(anchor, now, 7*24*time.Hour)
+	}
+	return policy.WeekBoundsChina(now)
+}
+
 // ClaudeFailoverTargetModel resolves the configured Claude failover target model.
 // Returns ("", false) when failover is disabled.
 // When enabled but target-model is empty, it returns a safe default.
@@ -228,7 +257,7 @@ func (p *APIKeyPolicy) ClaudeFailoverTargetModel() (string, bool) {
 	}
 	target := strings.TrimSpace(p.Failover.Claude.TargetModel)
 	if target == "" {
-		target = "gpt-5.4(high)"
+		target = "gpt-5.4(medium)"
 	}
 	return target, true
 }
@@ -280,6 +309,63 @@ func (cfg *Config) FindAPIKeyPolicy(apiKey string) *APIKeyPolicy {
 		}
 	}
 	return nil
+}
+
+// ShouldRouteClaudeToGPT reports whether this client API key should be subject to
+// the global Claude -> GPT routing override.
+func (cfg *Config) ShouldRouteClaudeToGPT(apiKey string) bool {
+	if cfg == nil || !cfg.ClaudeToGPTRoutingEnabled {
+		return false
+	}
+	entry := cfg.FindAPIKeyPolicy(apiKey)
+	if entry == nil {
+		return true
+	}
+	return !entry.ClaudeModelsEnabled()
+}
+
+// EffectiveAPIKeyPolicy returns a copy of the API key policy augmented with
+// global defaults such as Claude -> GPT routing.
+func (cfg *Config) EffectiveAPIKeyPolicy(apiKey string) *APIKeyPolicy {
+	if cfg == nil {
+		return nil
+	}
+	key := strings.TrimSpace(apiKey)
+	if key == "" {
+		return nil
+	}
+
+	entry := APIKeyPolicy{APIKey: key}
+	if found := cfg.FindAPIKeyPolicy(key); found != nil {
+		entry = *found
+	}
+
+	if !cfg.ShouldRouteClaudeToGPT(key) {
+		if found := cfg.FindAPIKeyPolicy(key); found != nil {
+			return &entry
+		}
+		return nil
+	}
+
+	enabled := true
+	entry.ModelRouting.Rules = append([]ModelRoutingRule{
+		{
+			Enabled:             &enabled,
+			FromModel:           "claude-opus-*",
+			TargetModel:         "gpt-5.4(high)",
+			TargetPercent:       100,
+			StickyWindowSeconds: 3600,
+		},
+		{
+			Enabled:             &enabled,
+			FromModel:           "claude-*",
+			TargetModel:         "gpt-5.4(medium)",
+			TargetPercent:       100,
+			StickyWindowSeconds: 3600,
+		},
+	}, entry.ModelRouting.Rules...)
+
+	return &entry
 }
 
 // SanitizeAPIKeyPolicies trims keys, normalizes excluded-model patterns, and drops invalid limits.
@@ -367,6 +453,11 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		}
 		if entry.WeeklyBudgetUSD <= 0 {
 			entry.WeeklyBudgetUSD = 0
+		}
+		if normalized, ok := policy.NormalizeHourlyAnchorRFC3339(entry.WeeklyBudgetAnchorAt); ok {
+			entry.WeeklyBudgetAnchorAt = normalized
+		} else {
+			entry.WeeklyBudgetAnchorAt = ""
 		}
 
 		key := entry.APIKey

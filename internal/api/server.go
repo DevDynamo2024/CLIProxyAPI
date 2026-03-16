@@ -584,7 +584,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/api-key-policies", s.mgmt.DeleteAPIKeyPolicies)
 
 		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
+		mgmt.GET("/model-prices/export", s.mgmt.ExportModelPrices)
 		mgmt.PUT("/model-prices", s.mgmt.PutModelPrice)
+		mgmt.POST("/model-prices/import", s.mgmt.ImportModelPrices)
 		mgmt.DELETE("/model-prices", s.mgmt.DeleteModelPrice)
 
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyDailyUsage)
@@ -640,6 +642,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
+		mgmt.GET("/claude-to-gpt-routing-enabled", s.mgmt.GetClaudeToGPTRoutingEnabled)
+		mgmt.PUT("/claude-to-gpt-routing-enabled", s.mgmt.PutClaudeToGPTRoutingEnabled)
+		mgmt.PATCH("/claude-to-gpt-routing-enabled", s.mgmt.PutClaudeToGPTRoutingEnabled)
 
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
@@ -878,7 +883,7 @@ func (s *Server) filterModelsForAPIKey(models []map[string]any, apiKey string) [
 	if s == nil || s.cfg == nil || len(models) == 0 {
 		return models
 	}
-	p := s.cfg.FindAPIKeyPolicy(apiKey)
+	p := s.cfg.EffectiveAPIKeyPolicy(apiKey)
 	if p == nil {
 		return models
 	}
@@ -894,6 +899,9 @@ func (s *Server) filterModelsForAPIKey(models []map[string]any, apiKey string) [
 			continue
 		}
 		if !p.AllowsClaudeOpus46() && strings.HasPrefix(idKey, "claude-opus-4-6") {
+			continue
+		}
+		if s.cfg.ShouldRouteClaudeToGPT(apiKey) && policy.IsClaudeModel(idKey) {
 			continue
 		}
 		denied := false

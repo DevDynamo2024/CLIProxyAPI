@@ -377,7 +377,7 @@ func rewriteModelField(body []byte, model string) []byte {
 }
 
 // responseModelFieldPaths lists JSON paths where model name may appear in API responses.
-var responseModelFieldPaths = []string{"model", "message.model"}
+var responseModelFieldPaths = []string{"model", "message.model", "response.model"}
 
 // rewriteResponseModelFields rewrites known model JSON paths in an API response
 // so the client sees the originally-requested model instead of the failover target.

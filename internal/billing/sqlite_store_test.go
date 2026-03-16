@@ -274,6 +274,67 @@ func TestSQLiteStore_GetCostMicroUSDByDayRange(t *testing.T) {
 	}
 }
 
+func TestSQLiteStore_GetCostMicroUSDByTimeRange(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.AddUsageEvent(ctx, UsageEventRow{
+		RequestedAt:  time.Date(2026, 3, 15, 10, 5, 0, 0, policy.ChinaLocation()).Unix(),
+		APIKey:       "k",
+		Source:       "openai",
+		AuthIndex:    "0",
+		Model:        "gpt-5.4",
+		InputTokens:  10,
+		OutputTokens: 2,
+		TotalTokens:  12,
+		CostMicroUSD: 111,
+	}); err != nil {
+		t.Fatalf("AddUsageEvent#1: %v", err)
+	}
+	if err := store.AddUsageEvent(ctx, UsageEventRow{
+		RequestedAt:  time.Date(2026, 3, 16, 9, 55, 0, 0, policy.ChinaLocation()).Unix(),
+		APIKey:       "k",
+		Source:       "openai",
+		AuthIndex:    "0",
+		Model:        "gpt-5.4",
+		InputTokens:  10,
+		OutputTokens: 2,
+		TotalTokens:  12,
+		CostMicroUSD: 222,
+	}); err != nil {
+		t.Fatalf("AddUsageEvent#2: %v", err)
+	}
+	if err := store.AddUsageEvent(ctx, UsageEventRow{
+		RequestedAt:  time.Date(2026, 3, 16, 10, 5, 0, 0, policy.ChinaLocation()).Unix(),
+		APIKey:       "k",
+		Source:       "openai",
+		AuthIndex:    "0",
+		Model:        "gpt-5.4",
+		InputTokens:  10,
+		OutputTokens: 2,
+		TotalTokens:  12,
+		CostMicroUSD: 333,
+	}); err != nil {
+		t.Fatalf("AddUsageEvent#3: %v", err)
+	}
+
+	start := time.Date(2026, 3, 15, 10, 0, 0, 0, policy.ChinaLocation())
+	end := time.Date(2026, 3, 16, 10, 0, 0, 0, policy.ChinaLocation())
+	total, err := store.GetCostMicroUSDByTimeRange(ctx, "k", start, end)
+	if err != nil {
+		t.Fatalf("GetCostMicroUSDByTimeRange: %v", err)
+	}
+	if total != 333 {
+		t.Fatalf("total=%d", total)
+	}
+}
+
 func TestSQLiteStore_BuildUsageStatisticsSnapshot_DBFirst(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "billing.sqlite")

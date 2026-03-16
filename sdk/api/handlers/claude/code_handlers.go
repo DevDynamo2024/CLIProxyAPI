@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -114,7 +115,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 
 	resp, errMsg := h.ExecuteCountWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClientError(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -168,7 +169,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	resp, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, alt)
 	stopKeepAlive()
 	if errMsg != nil {
-		h.WriteErrorResponse(c, errMsg)
+		h.writeClientError(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
@@ -246,7 +247,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
+			h.writeClientError(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -290,6 +291,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			if errMsg == nil {
 				return
 			}
+			errMsg = h.sanitizeClientError(errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode
@@ -300,6 +302,70 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 	})
+}
+
+func (h *ClaudeCodeAPIHandler) writeClientError(c *gin.Context, msg *interfaces.ErrorMessage) {
+	h.WriteErrorResponse(c, h.sanitizeClientError(msg))
+}
+
+func (h *ClaudeCodeAPIHandler) sanitizeClientError(msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if !shouldSuppressCodexUsageLimitError(msg) {
+		return msg
+	}
+
+	raw := ""
+	if msg != nil && msg.Error != nil {
+		raw = strings.TrimSpace(msg.Error.Error())
+	}
+	log.WithFields(log.Fields{
+		"component":      "claude_error_sanitize",
+		"status_code":    msg.StatusCode,
+		"upstream_error": raw,
+	}).Warn("suppressing raw Codex usage limit error for Claude client")
+
+	sanitized := *msg
+	sanitized.Error = fmt.Errorf("upstream model temporarily unavailable, please retry later")
+	return &sanitized
+}
+
+func shouldSuppressCodexUsageLimitError(msg *interfaces.ErrorMessage) bool {
+	if msg == nil || msg.Error == nil || msg.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+
+	raw := extractEmbeddedJSON(msg.Error.Error())
+	if raw == "" {
+		return false
+	}
+
+	var payload struct {
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(payload.Error.Type), "usage_limit_reached")
+}
+
+func extractEmbeddedJSON(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if json.Valid([]byte(raw)) {
+		return raw
+	}
+	start := strings.IndexByte(raw, '{')
+	if start < 0 {
+		return ""
+	}
+	candidate := strings.TrimSpace(raw[start:])
+	if !json.Valid([]byte(candidate)) {
+		return ""
+	}
+	return candidate
 }
 
 type claudeErrorDetail struct {

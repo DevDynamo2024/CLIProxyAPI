@@ -64,15 +64,17 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		Claude *providerFailoverPatch `json:"claude"`
 	}
 	type policyPatch struct {
-		ModelRouting      *modelRoutingPatch `json:"model-routing"`
-		UpstreamBaseURL   *string            `json:"upstream-base-url"`
-		ExcludedModels    *[]string          `json:"excluded-models"`
-		AllowClaudeOpus46 *bool              `json:"allow-claude-opus-4-6"`
-		DailyLimits       *map[string]int    `json:"daily-limits"`
-		DailyBudgetUSD    *float64           `json:"daily-budget-usd"`
-		WeeklyBudgetUSD   *float64           `json:"weekly-budget-usd"`
-		Failover          *failoverPatch     `json:"failover"`
-		APIKey            *string            `json:"api-key"`
+		EnableClaudeModels   *bool              `json:"enable-claude-models"`
+		ModelRouting         *modelRoutingPatch `json:"model-routing"`
+		UpstreamBaseURL      *string            `json:"upstream-base-url"`
+		ExcludedModels       *[]string          `json:"excluded-models"`
+		AllowClaudeOpus46    *bool              `json:"allow-claude-opus-4-6"`
+		DailyLimits          *map[string]int    `json:"daily-limits"`
+		DailyBudgetUSD       *float64           `json:"daily-budget-usd"`
+		WeeklyBudgetUSD      *float64           `json:"weekly-budget-usd"`
+		WeeklyBudgetAnchorAt *string            `json:"weekly-budget-anchor-at"`
+		Failover             *failoverPatch     `json:"failover"`
+		APIKey               *string            `json:"api-key"`
 	}
 	var body struct {
 		APIKey string       `json:"api-key"`
@@ -117,6 +119,10 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		entry.APIKey = trimmed
 	}
 
+	if body.Value.EnableClaudeModels != nil {
+		v := *body.Value.EnableClaudeModels
+		entry.EnableClaudeModels = &v
+	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
@@ -138,6 +144,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 	if body.Value.WeeklyBudgetUSD != nil {
 		entry.WeeklyBudgetUSD = *body.Value.WeeklyBudgetUSD
+	}
+	if body.Value.WeeklyBudgetAnchorAt != nil {
+		entry.WeeklyBudgetAnchorAt = strings.TrimSpace(*body.Value.WeeklyBudgetAnchorAt)
 	}
 	if body.Value.Failover != nil && body.Value.Failover.Claude != nil {
 		if body.Value.Failover.Claude.Enabled != nil {

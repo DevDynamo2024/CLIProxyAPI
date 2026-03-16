@@ -43,6 +43,52 @@ func WeekBoundsChina(now time.Time) (start time.Time, end time.Time) {
 	return start, end
 }
 
+// NormalizeHourlyAnchorRFC3339 parses an RFC3339 anchor and rounds it down to hour precision.
+func NormalizeHourlyAnchorRFC3339(raw string) (string, bool) {
+	anchor, ok := ParseHourlyAnchorRFC3339(raw)
+	if !ok {
+		return "", false
+	}
+	return anchor.Format(time.RFC3339), true
+}
+
+// ParseHourlyAnchorRFC3339 parses an RFC3339 timestamp and normalizes it to hour precision.
+func ParseHourlyAnchorRFC3339(raw string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, trimmed)
+	if err != nil {
+		return time.Time{}, false
+	}
+	parsed = parsed.In(parsed.Location())
+	parsed = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), parsed.Hour(), 0, 0, 0, parsed.Location())
+	return parsed, true
+}
+
+// AnchoredWindowBounds returns the active [start, end) window for a fixed-size anchored interval.
+// When now is before the anchor, the upcoming window starting at anchor is returned.
+func AnchoredWindowBounds(anchor, now time.Time, duration time.Duration) (start time.Time, end time.Time) {
+	if duration <= 0 {
+		duration = 7 * 24 * time.Hour
+	}
+	if anchor.IsZero() {
+		return now, now.Add(duration)
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Before(anchor) {
+		return anchor, anchor.Add(duration)
+	}
+	elapsed := now.Sub(anchor)
+	windows := elapsed / duration
+	start = anchor.Add(windows * duration)
+	end = start.Add(duration)
+	return start, end
+}
+
 // SQLiteDailyLimiter provides atomic per-day counters keyed by (api_key, model, day).
 // It is used to enforce daily request limits that must survive process restarts.
 type SQLiteDailyLimiter struct {
