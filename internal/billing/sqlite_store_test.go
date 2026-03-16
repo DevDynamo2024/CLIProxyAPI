@@ -8,6 +8,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
 	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func TestSQLiteStore_ModelPrices_DefaultAndOverride(t *testing.T) {
@@ -231,6 +232,61 @@ func TestSQLiteStore_AddUsageAndDailyCost(t *testing.T) {
 	}
 	if len(report.Models) != 1 {
 		t.Fatalf("models=%d", len(report.Models))
+	}
+}
+
+func TestUsagePersistPlugin_PersistsWhenRequestContextCancelled(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "billing.sqlite")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer store.Close()
+
+	plugin := NewUsagePersistPlugin(store)
+	requestedAt := time.Date(2026, 3, 16, 12, 0, 0, 0, time.UTC)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	plugin.HandleUsage(ctx, coreusage.Record{
+		Provider:    "codex",
+		Model:       "gpt-5.4",
+		APIKey:      "client-key",
+		AuthIndex:   "auth-1",
+		Source:      "client-key",
+		RequestedAt: requestedAt,
+		Detail: coreusage.Detail{
+			InputTokens:  18,
+			OutputTokens: 5,
+			TotalTokens:  23,
+		},
+	})
+
+	report, err := store.GetDailyUsageReport(context.Background(), "client-key", policy.DayKeyChina(requestedAt))
+	if err != nil {
+		t.Fatalf("GetDailyUsageReport: %v", err)
+	}
+	if report.TotalRequests != 1 {
+		t.Fatalf("TotalRequests=%d want=1", report.TotalRequests)
+	}
+	if report.TotalTokens != 23 {
+		t.Fatalf("TotalTokens=%d want=23", report.TotalTokens)
+	}
+
+	events, err := store.ListUsageEvents(context.Background(), requestedAt.Add(-time.Minute), requestedAt.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ListUsageEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("usage events=%d want=1", len(events))
+	}
+	if events[0].APIKey != "client-key" {
+		t.Fatalf("event api_key=%q want=client-key", events[0].APIKey)
+	}
+	if events[0].Model != policy.NormaliseModelKey("gpt-5.4") {
+		t.Fatalf("event model=%q", events[0].Model)
 	}
 }
 

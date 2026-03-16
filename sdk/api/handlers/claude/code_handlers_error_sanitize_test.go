@@ -19,6 +19,7 @@ import (
 
 const rawUsageLimitError = `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"team","resets_in_seconds":11773}}`
 const rawServiceUnavailableError = "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: https://www.open1.codes/responses, cf-ray: 9dd161f09d39cc65-LAX, request id: 7160033a-4597-4632-846c-d1872c107f06"
+const rawModelCooldownError = `{"error":{"code":"model_cooldown","message":"All credentials for model gpt-5.4(high) are cooling down","model":"gpt-5.4(high)","reset_seconds":41,"reset_time":"41s"}}`
 
 type claudeFailoverTriggerExecutor struct{}
 
@@ -207,6 +208,55 @@ func (e *serviceUnavailableExecutor) HttpRequest(context.Context, *coreauth.Auth
 	}
 }
 
+type modelCooldownExecutor struct{}
+
+func (e *modelCooldownExecutor) Identifier() string { return "codex" }
+
+func (e *modelCooldownExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{
+		Code:       "upstream_error",
+		Message:    rawModelCooldownError,
+		Retryable:  false,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+}
+
+func (e *modelCooldownExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+	ch := make(chan coreexecutor.StreamChunk, 1)
+	ch <- coreexecutor.StreamChunk{
+		Err: &coreauth.Error{
+			Code:       "upstream_error",
+			Message:    rawModelCooldownError,
+			Retryable:  false,
+			HTTPStatus: http.StatusTooManyRequests,
+		},
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (e *modelCooldownExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *modelCooldownExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, &coreauth.Error{
+		Code:       "upstream_error",
+		Message:    rawModelCooldownError,
+		Retryable:  false,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+}
+
+func (e *modelCooldownExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{
+		Code:       "upstream_error",
+		Message:    rawModelCooldownError,
+		Retryable:  false,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
+}
+
 func registerCodexTestAuth(t *testing.T, manager *coreauth.Manager, model string) {
 	t.Helper()
 
@@ -327,6 +377,35 @@ func TestClaudeMessages_SuppressesRawServiceUnavailableAfterFailover(t *testing.
 	}
 	if strings.Contains(body, "open1.codes") || strings.Contains(body, "cf-ray") || strings.Contains(body, "request id") {
 		t.Fatalf("expected sanitized 503 body, got %s", body)
+	}
+	if !strings.Contains(body, "upstream model temporarily unavailable, please retry later") {
+		t.Fatalf("expected generic retry message, got %s", body)
+	}
+}
+
+func TestClaudeMessages_SuppressesRawModelCooldownAfterFailover(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&claudeFailoverTriggerExecutor{})
+	manager.RegisterExecutor(&modelCooldownExecutor{})
+	registerClaudeTestAuth(t, manager, "claude-opus-4-6")
+	registerCodexTestAuth(t, manager, "gpt-5.4")
+
+	handler := NewClaudeCodeAPIHandler(basehandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(`{"model":"claude-opus-4-6","stream":false}`)))
+	attachFailoverPolicy(c)
+
+	handler.ClaudeMessages(c)
+
+	body := w.Body.String()
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusTooManyRequests, body)
+	}
+	if strings.Contains(body, "model_cooldown") || strings.Contains(body, "gpt-5.4(high)") || strings.Contains(body, "reset_seconds") {
+		t.Fatalf("expected sanitized cooldown body, got %s", body)
 	}
 	if !strings.Contains(body, "upstream model temporarily unavailable, please retry later") {
 		t.Fatalf("expected generic retry message, got %s", body)

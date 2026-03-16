@@ -162,3 +162,120 @@ func TestPatchAPIKeyPolicies_EnableClaudeModels(t *testing.T) {
 		t.Fatalf("enable-claude-models not persisted: %+v", policy)
 	}
 }
+
+func TestPatchAPIKeyPolicies_DisableClaudeFailoverRemovesEnabledFlagFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	initial := `port: 8080
+api-key-policies:
+  - api-key: k1
+    failover:
+      claude:
+        enabled: true
+        target-model: gpt-5.4(medium)
+        rules:
+          - from-model: "claude-opus-4-6*"
+            target-model: "gpt-5.4(high)"
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	h := management.NewHandler(cfg, configPath, nil)
+	r := setupAPIKeyPoliciesRouter(h)
+
+	body := `{"api-key":"k1","value":{"failover":{"claude":{"enabled":false,"target-model":"gpt-5.4(medium)","rules":[{"from-model":"claude-opus-4-6*","target-model":"gpt-5.4(high)"}]}}}}`
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/api-key-policies", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if bytes.Contains(raw, []byte("enabled: true")) {
+		t.Fatalf("config still contains enabled: true\n%s", string(raw))
+	}
+	if bytes.Contains(raw, []byte("target-model: gpt-5.4(medium)")) {
+		t.Fatalf("config still contains disabled failover target-model\n%s", string(raw))
+	}
+	if bytes.Contains(raw, []byte("from-model:")) {
+		t.Fatalf("config still contains disabled failover rules\n%s", string(raw))
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after patch: %v", err)
+	}
+	policy := loaded.FindAPIKeyPolicy("k1")
+	if policy == nil {
+		t.Fatalf("missing policy after patch")
+	}
+	if policy.Failover.Claude.Enabled {
+		t.Fatalf("expected failover disabled after reload: %+v", policy.Failover.Claude)
+	}
+}
+
+func TestPatchAPIKeyPolicies_FailoverProviderBlockReplacesPreviousEnabledState(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	initial := `port: 8080
+api-key-policies:
+  - api-key: k1
+    failover:
+      claude:
+        enabled: true
+        target-model: gpt-5.4(medium)
+        rules:
+          - from-model: "claude-opus-4-6*"
+            target-model: "gpt-5.4(high)"
+`
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	h := management.NewHandler(cfg, configPath, nil)
+	r := setupAPIKeyPoliciesRouter(h)
+
+	// Simulate a legacy frontend that sends a full provider block but omits enabled=false.
+	body := `{"api-key":"k1","value":{"failover":{"claude":{"target-model":"gpt-5.4(medium)"}}}}`
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/api-key-policies", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after patch: %v", err)
+	}
+	policy := loaded.FindAPIKeyPolicy("k1")
+	if policy == nil {
+		t.Fatalf("missing policy after patch")
+	}
+	if policy.Failover.Claude.Enabled {
+		t.Fatalf("expected failover disabled after replacement patch: %+v", policy.Failover.Claude)
+	}
+	if policy.Failover.Claude.TargetModel != "" {
+		t.Fatalf("expected disabled failover target to be cleared, got %q", policy.Failover.Claude.TargetModel)
+	}
+	if len(policy.Failover.Claude.Rules) != 0 {
+		t.Fatalf("expected old failover rules to be cleared, got %+v", policy.Failover.Claude.Rules)
+	}
+}

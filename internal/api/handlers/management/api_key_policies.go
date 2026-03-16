@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 func (h *Handler) GetAPIKeyPolicies(c *gin.Context) {
@@ -149,6 +150,25 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		entry.WeeklyBudgetAnchorAt = strings.TrimSpace(*body.Value.WeeklyBudgetAnchorAt)
 	}
 	if body.Value.Failover != nil && body.Value.Failover.Claude != nil {
+		ruleCount := -1
+		if body.Value.Failover.Claude.Rules != nil {
+			ruleCount = len(*body.Value.Failover.Claude.Rules)
+		}
+		log.WithFields(log.Fields{
+			"api_key":           apiKey,
+			"enabled_present":   body.Value.Failover.Claude.Enabled != nil,
+			"enabled_value":     body.Value.Failover.Claude.Enabled,
+			"target_present":    body.Value.Failover.Claude.TargetModel != nil,
+			"rules_present":     body.Value.Failover.Claude.Rules != nil,
+			"rules_count":       ruleCount,
+			"existing_enabled":  entry.Failover.Claude.Enabled,
+			"existing_target":   entry.Failover.Claude.TargetModel,
+			"existing_rule_len": len(entry.Failover.Claude.Rules),
+		}).Info("management api-key-policies patch: received claude failover block")
+
+		// Treat a provided provider block as replacement instead of field-merge,
+		// so omitted nested fields like enabled=false do not preserve stale values.
+		entry.Failover.Claude = config.ProviderFailoverPolicy{}
 		if body.Value.Failover.Claude.Enabled != nil {
 			entry.Failover.Claude.Enabled = *body.Value.Failover.Claude.Enabled
 		}
@@ -158,6 +178,12 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		if body.Value.Failover.Claude.Rules != nil {
 			entry.Failover.Claude.Rules = append([]config.ModelFailoverRule(nil), (*body.Value.Failover.Claude.Rules)...)
 		}
+		log.WithFields(log.Fields{
+			"api_key":         apiKey,
+			"final_enabled":   entry.Failover.Claude.Enabled,
+			"final_target":    entry.Failover.Claude.TargetModel,
+			"final_rule_len":  len(entry.Failover.Claude.Rules),
+		}).Info("management api-key-policies patch: applied claude failover block")
 	}
 
 	if targetIndex >= 0 {

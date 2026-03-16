@@ -428,6 +428,11 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 			}
 			entry.Failover.Claude.Rules = rules
 		}
+		if !entry.Failover.Claude.Enabled {
+			// Disabled failover should not leave inert target/rule config behind.
+			entry.Failover.Claude.TargetModel = ""
+			entry.Failover.Claude.Rules = nil
+		}
 
 		if len(entry.DailyLimits) > 0 {
 			normalized := make(map[string]int, len(entry.DailyLimits))

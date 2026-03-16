@@ -10,6 +10,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const usagePersistTimeout = 5 * time.Second
+
 type UsagePersistPlugin struct {
 	store *SQLiteStore
 }
@@ -22,6 +24,9 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 	if p == nil || p.store == nil {
 		return
 	}
+	persistCtx, cancel := context.WithTimeout(context.Background(), usagePersistTimeout)
+	defer cancel()
+
 	apiKey := strings.TrimSpace(record.APIKey)
 	if apiKey == "" {
 		return
@@ -45,8 +50,13 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		detail.TotalTokens = 0
 	}
 
-	price, priceSource, _, err := p.store.ResolvePriceMicro(ctx, modelKey)
+	price, priceSource, _, err := p.store.ResolvePriceMicro(persistCtx, modelKey)
 	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"component": "billing",
+			"api_key":   apiKey,
+			"model":     modelKey,
+		}).Warn("failed to resolve billing price for usage record")
 		return
 	}
 	if priceSource == "missing" {
@@ -68,8 +78,15 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		TotalTokens:     max64(0, detail.TotalTokens),
 		CostMicroUSD:    max64(0, cost),
 	}
-	_ = p.store.AddUsage(ctx, apiKey, modelKey, dayKey, delta)
-	_ = p.store.AddUsageEvent(ctx, UsageEventRow{
+	if err := p.store.AddUsage(persistCtx, apiKey, modelKey, dayKey, delta); err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"component": "billing",
+			"api_key":   apiKey,
+			"model":     modelKey,
+			"day":       dayKey,
+		}).Warn("failed to persist daily usage row")
+	}
+	if err := p.store.AddUsageEvent(persistCtx, UsageEventRow{
 		RequestedAt:     ts.Unix(),
 		APIKey:          apiKey,
 		Source:          strings.TrimSpace(record.Source),
@@ -82,7 +99,13 @@ func (p *UsagePersistPlugin) HandleUsage(ctx context.Context, record coreusage.R
 		CachedTokens:    max64(0, detail.CachedTokens),
 		TotalTokens:     max64(0, detail.TotalTokens),
 		CostMicroUSD:    max64(0, cost),
-	})
+	}); err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"component": "billing",
+			"api_key":   apiKey,
+			"model":     modelKey,
+		}).Warn("failed to persist usage event row")
+	}
 }
 
 func boolToInt64(v bool) int64 {

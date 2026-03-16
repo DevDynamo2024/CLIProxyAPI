@@ -1148,6 +1148,9 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 			copyNodeShallow(dst, src)
 		}
 		mergeMappingPreserve(dst, src, currentPath)
+		if shouldPruneMissingMapKeysForPath(currentPath) {
+			pruneMissingMapKeys(dst, src)
+		}
 	case yaml.SequenceNode:
 		// Preserve explicit null style if dst was null and src is empty sequence
 		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
@@ -1195,6 +1198,18 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 	default:
 		// Fallback: replace shallowly
 		copyNodeShallow(dst, src)
+	}
+}
+
+func shouldPruneMissingMapKeysForPath(path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	switch path[0] {
+	case "api-key-policies":
+		return true
+	default:
+		return false
 	}
 }
 
