@@ -361,6 +361,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// FastMode forces requests made with this key to use priority service tier.
+	FastMode bool `yaml:"fast-mode,omitempty" json:"fast-mode,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`

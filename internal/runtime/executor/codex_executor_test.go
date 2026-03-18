@@ -242,6 +242,45 @@ func TestCodexExecutorStripsToolChoiceForClaudeFailoverRequests(t *testing.T) {
 	}
 }
 
+func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
+	t.Parallel()
+
+	var seenBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		seenBody = append([]byte(nil), body...)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":   "test",
+		"base_url":  srv.URL,
+		"fast_mode": "true",
+	}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := exec.Execute(ctx, auth, req, opts); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(seenBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q (payload=%s)", got, "priority", string(seenBody))
+	}
+}
+
 func TestCodexExecutorStripsStoreBeforeUpstream(t *testing.T) {
 	var mu sync.Mutex
 	var seenBody []byte

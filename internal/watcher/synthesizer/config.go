@@ -154,6 +154,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			"source":  fmt.Sprintf("config:codex[%s]", token),
 			"api_key": key,
 		}
+		if ck.FastMode {
+			attrs["fast_mode"] = "true"
+		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
