@@ -213,15 +213,19 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		engine.Use(mw)
 	}
 
-	// Add request logging middleware (positioned after recovery, before auth)
-	// Resolve logs directory relative to the configuration file directory.
+	// Add request logging middleware (positioned after recovery, before auth).
+	// In commercial mode we still honor an explicit request-log=true setting so
+	// operators can opt into detailed request capture for troubleshooting.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
-	if !cfg.CommercialMode {
+	if !cfg.CommercialMode || cfg.RequestLog {
 		if optionState.requestLoggerFactory != nil {
 			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
 		}
 		if requestLogger != nil {
+			if cfg.CommercialMode && cfg.RequestLog {
+				log.Warn("commercial-mode is enabled, but request-log=true explicitly enables detailed request logging")
+			}
 			engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
 			if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
 				toggle = setter.SetEnabled
@@ -300,8 +304,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		optionState.routerConfigurator(engine, s.handlers, cfg)
 	}
 
-	// Register management routes when configuration or environment secrets are available.
-	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret
+	// Register management routes when configuration, environment, or local-only password access is available.
+	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || optionState.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
 	if hasManagementSecret {
 		s.registerManagementRoutes()
@@ -647,6 +651,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/claude-to-gpt-routing-enabled", s.mgmt.GetClaudeToGPTRoutingEnabled)
 		mgmt.PUT("/claude-to-gpt-routing-enabled", s.mgmt.PutClaudeToGPTRoutingEnabled)
 		mgmt.PATCH("/claude-to-gpt-routing-enabled", s.mgmt.PutClaudeToGPTRoutingEnabled)
+		mgmt.GET("/disable-claude-opus-1m", s.mgmt.GetDisableClaudeOpus1M)
+		mgmt.PUT("/disable-claude-opus-1m", s.mgmt.PutDisableClaudeOpus1M)
+		mgmt.PATCH("/disable-claude-opus-1m", s.mgmt.PutDisableClaudeOpus1M)
 
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
@@ -686,6 +693,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
+		mgmt.GET("/mock/claude-quotas", s.mgmt.GetMockClaudeQuotas)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
@@ -1082,10 +1090,15 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""
 	}
 	newSecretEmpty := cfg.RemoteManagement.SecretKey == ""
-	if s.envManagementSecret {
+	localPasswordEnabled := strings.TrimSpace(s.localPassword) != ""
+	if s.envManagementSecret || localPasswordEnabled {
 		s.registerManagementRoutes()
 		if s.managementRoutesEnabled.CompareAndSwap(false, true) {
-			log.Info("management routes enabled via MANAGEMENT_PASSWORD")
+			if s.envManagementSecret {
+				log.Info("management routes enabled via MANAGEMENT_PASSWORD")
+			} else {
+				log.Info("management routes enabled via local management password")
+			}
 		} else {
 			s.managementRoutesEnabled.Store(true)
 		}

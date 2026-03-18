@@ -20,6 +20,8 @@ import (
 
 const (
 	apiKeyPolicyContextKey = "apiKeyPolicy"
+	claudeOpus1MHeaderName = "X-CPA-CLAUDE-1M"
+	claudeOpus1MBetaName   = "context-1m-2025-08-07"
 )
 
 type priceResolver interface {
@@ -47,6 +49,7 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 			c.Next()
 			return
 		}
+		allowClaudeOpus1M := cfg.AllowsClaudeOpus1M(apiKey)
 
 		if p := cfg.EffectiveAPIKeyPolicy(apiKey); p != nil {
 			c.Set(apiKeyPolicyContextKey, p)
@@ -54,6 +57,10 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 
 		policyValue, _ := c.Get(apiKeyPolicyContextKey)
 		policyEntry, _ := policyValue.(*config.APIKeyPolicy)
+
+		if !allowClaudeOpus1M {
+			stripClaudeOpus1MHeaders(c.Request.Header)
+		}
 
 		// Only enforce request-body model rules for JSON body endpoints.
 		// GET /v1/models is handled by response filtering.
@@ -68,6 +75,15 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 			return
 		}
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+		if !allowClaudeOpus1M {
+			filteredBody := stripClaudeOpus1MBetaFromBody(bodyBytes)
+			if !bytes.Equal(filteredBody, bodyBytes) {
+				bodyBytes = filteredBody
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				c.Request.ContentLength = int64(len(bodyBytes))
+			}
+		}
 
 		model := strings.TrimSpace(gjson.GetBytes(bodyBytes, "model").String())
 		if model == "" {
@@ -227,6 +243,72 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 
 		c.Next()
 	}
+}
+
+func stripClaudeOpus1MHeaders(header http.Header) {
+	if header == nil {
+		return
+	}
+	header.Del(claudeOpus1MHeaderName)
+	if betaHeader := header.Get("Anthropic-Beta"); betaHeader != "" {
+		if filtered := filterBetaFeatures(betaHeader, claudeOpus1MBetaName); filtered != "" {
+			header.Set("Anthropic-Beta", filtered)
+		} else {
+			header.Del("Anthropic-Beta")
+		}
+	}
+}
+
+func stripClaudeOpus1MBetaFromBody(body []byte) []byte {
+	betasResult := gjson.GetBytes(body, "betas")
+	if !betasResult.Exists() {
+		return body
+	}
+
+	filtered := make([]string, 0, len(betasResult.Array()))
+	appendBeta := func(raw string) {
+		for _, beta := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(beta)
+			if trimmed == "" || trimmed == claudeOpus1MBetaName {
+				continue
+			}
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	if betasResult.IsArray() {
+		for _, item := range betasResult.Array() {
+			appendBeta(item.String())
+		}
+	} else {
+		appendBeta(betasResult.String())
+	}
+
+	var next []byte
+	var err error
+	if len(filtered) == 0 {
+		next, err = sjson.DeleteBytes(body, "betas")
+	} else {
+		next, err = sjson.SetBytes(body, "betas", filtered)
+	}
+	if err != nil {
+		return body
+	}
+	return next
+}
+
+func filterBetaFeatures(header, featureToRemove string) string {
+	features := strings.Split(header, ",")
+	filtered := make([]string, 0, len(features))
+
+	for _, feature := range features {
+		trimmed := strings.TrimSpace(feature)
+		if trimmed != "" && trimmed != featureToRemove {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return strings.Join(filtered, ",")
 }
 
 func resolveDailyLimit(p *config.APIKeyPolicy, modelKey string) (limit int, limitKey string) {

@@ -13,6 +13,11 @@ type SDKConfig struct {
 	// to route to GPT targets unless the API key policy explicitly enables Claude models.
 	ClaudeToGPTRoutingEnabled bool `yaml:"claude-to-gpt-routing-enabled" json:"claude-to-gpt-routing-enabled"`
 
+	// DisableClaudeOpus1M strips Claude Opus 1M capability from client API key requests by default.
+	// When true, the proxy removes the custom 1M header and beta flag unless the API key policy
+	// explicitly enables Opus 1M for that key.
+	DisableClaudeOpus1M bool `yaml:"disable-claude-opus-1m" json:"disable-claude-opus-1m"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

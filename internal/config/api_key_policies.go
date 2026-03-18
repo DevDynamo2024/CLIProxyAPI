@@ -17,6 +17,10 @@ type APIKeyPolicy struct {
 	// It only takes effect when claude-to-gpt-routing-enabled is true.
 	EnableClaudeModels *bool `yaml:"enable-claude-models,omitempty" json:"enable-claude-models,omitempty"`
 
+	// EnableClaudeOpus1M allows this API key to keep Claude Opus 1M capability even when
+	// the global disable-claude-opus-1m switch is enabled.
+	EnableClaudeOpus1M *bool `yaml:"enable-claude-opus-1m,omitempty" json:"enable-claude-opus-1m,omitempty"`
+
 	// UpstreamBaseURL overrides the upstream API base URL for this client API key.
 	// When set, /v1/* requests will be transparently proxied to this base URL instead of
 	// routing to the configured providers in this server. This is useful for chaining
@@ -232,6 +236,13 @@ func (p *APIKeyPolicy) ClaudeModelsEnabled() bool {
 	return *p.EnableClaudeModels
 }
 
+func (p *APIKeyPolicy) ClaudeOpus1MEnabled() bool {
+	if p == nil || p.EnableClaudeOpus1M == nil {
+		return false
+	}
+	return *p.EnableClaudeOpus1M
+}
+
 // WeeklyBudgetBounds resolves the active weekly budget window for the policy.
 // When WeeklyBudgetAnchorAt is unset or invalid, it falls back to the legacy
 // Monday 00:00 -> next Monday 00:00 China-time window.
@@ -322,6 +333,20 @@ func (cfg *Config) ShouldRouteClaudeToGPT(apiKey string) bool {
 		return true
 	}
 	return !entry.ClaudeModelsEnabled()
+}
+
+// AllowsClaudeOpus1M reports whether this client API key may keep Claude Opus 1M capability.
+// When the global switch is off, all keys are allowed. When the global switch is on, only
+// keys with enable-claude-opus-1m=true are allowed.
+func (cfg *Config) AllowsClaudeOpus1M(apiKey string) bool {
+	if cfg == nil || !cfg.DisableClaudeOpus1M {
+		return true
+	}
+	entry := cfg.FindAPIKeyPolicy(apiKey)
+	if entry == nil {
+		return false
+	}
+	return entry.ClaudeOpus1MEnabled()
 }
 
 // EffectiveAPIKeyPolicy returns a copy of the API key policy augmented with

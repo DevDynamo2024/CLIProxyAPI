@@ -66,6 +66,7 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	}
 	type policyPatch struct {
 		EnableClaudeModels   *bool              `json:"enable-claude-models"`
+		EnableClaudeOpus1M   *bool              `json:"enable-claude-opus-1m"`
 		ModelRouting         *modelRoutingPatch `json:"model-routing"`
 		UpstreamBaseURL      *string            `json:"upstream-base-url"`
 		ExcludedModels       *[]string          `json:"excluded-models"`
@@ -124,6 +125,10 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		v := *body.Value.EnableClaudeModels
 		entry.EnableClaudeModels = &v
 	}
+	if body.Value.EnableClaudeOpus1M != nil {
+		v := *body.Value.EnableClaudeOpus1M
+		entry.EnableClaudeOpus1M = &v
+	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
 	}
@@ -179,10 +184,10 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 			entry.Failover.Claude.Rules = append([]config.ModelFailoverRule(nil), (*body.Value.Failover.Claude.Rules)...)
 		}
 		log.WithFields(log.Fields{
-			"api_key":         apiKey,
-			"final_enabled":   entry.Failover.Claude.Enabled,
-			"final_target":    entry.Failover.Claude.TargetModel,
-			"final_rule_len":  len(entry.Failover.Claude.Rules),
+			"api_key":        apiKey,
+			"final_enabled":  entry.Failover.Claude.Enabled,
+			"final_target":   entry.Failover.Claude.TargetModel,
+			"final_rule_len": len(entry.Failover.Claude.Rules),
 		}).Info("management api-key-policies patch: applied claude failover block")
 	}
 

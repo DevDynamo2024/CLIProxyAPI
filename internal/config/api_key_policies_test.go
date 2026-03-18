@@ -66,6 +66,34 @@ func TestConfig_ShouldRouteClaudeToGPT_RespectsPerKeyClaudeEnable(t *testing.T) 
 	}
 }
 
+func TestConfig_AllowsClaudeOpus1M_DefaultsEnabledWhenGlobalDisabled(t *testing.T) {
+	cfg := &Config{}
+
+	if !cfg.AllowsClaudeOpus1M("k1") {
+		t.Fatal("expected Opus 1M to remain enabled when the global switch is off")
+	}
+}
+
+func TestConfig_AllowsClaudeOpus1M_RespectsPerKeyOverride(t *testing.T) {
+	cfg := &Config{
+		SDKConfig: SDKConfig{DisableClaudeOpus1M: true},
+		APIKeyPolicies: []APIKeyPolicy{
+			{APIKey: "k1", EnableClaudeOpus1M: boolPtr(true)},
+			{APIKey: "k2"},
+		},
+	}
+
+	if !cfg.AllowsClaudeOpus1M("k1") {
+		t.Fatal("expected k1 to override the global Opus 1M disable switch")
+	}
+	if cfg.AllowsClaudeOpus1M("k2") {
+		t.Fatal("expected k2 to inherit the global Opus 1M disable switch")
+	}
+	if cfg.AllowsClaudeOpus1M("k3") {
+		t.Fatal("expected unknown keys to inherit the global Opus 1M disable switch")
+	}
+}
+
 func TestConfig_EffectiveAPIKeyPolicy_AddsGlobalClaudeRoutingRules(t *testing.T) {
 	cfg := &Config{SDKConfig: SDKConfig{ClaudeToGPTRoutingEnabled: true}}
 

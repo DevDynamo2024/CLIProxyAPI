@@ -288,6 +288,14 @@ func (h *Handler) PutClaudeToGPTRoutingEnabled(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.ClaudeToGPTRoutingEnabled = v })
 }
 
+// DisableClaudeOpus1M
+func (h *Handler) GetDisableClaudeOpus1M(c *gin.Context) {
+	c.JSON(200, gin.H{"disable-claude-opus-1m": h.cfg.DisableClaudeOpus1M})
+}
+func (h *Handler) PutDisableClaudeOpus1M(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.DisableClaudeOpus1M = v })
+}
+
 func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
