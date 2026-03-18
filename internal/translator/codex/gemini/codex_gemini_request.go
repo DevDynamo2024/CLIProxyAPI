@@ -276,7 +276,6 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	}
 	out, _ = sjson.Set(out, "reasoning.summary", "auto")
 	out, _ = sjson.Set(out, "stream", true)
-	out, _ = sjson.Set(out, "store", false)
 	out, _ = sjson.Set(out, "include", []string{"reasoning.encrypted_content"})
 
 	var pathsToLower []string

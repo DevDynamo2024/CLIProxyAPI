@@ -708,6 +708,10 @@ func stripUnsupportedCodexFields(body []byte) []byte {
 	if updated, err := sjson.DeleteBytes(out, "tool_choice"); err == nil {
 		out = updated
 	}
+	// Upstream now rejects the legacy store toggle as an unknown parameter.
+	if updated, err := sjson.DeleteBytes(out, "store"); err == nil {
+		out = updated
+	}
 	return out
 }
 

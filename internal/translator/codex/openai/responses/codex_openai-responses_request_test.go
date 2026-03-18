@@ -160,8 +160,8 @@ func TestConvertSystemRoleToDeveloper_NoInputField(t *testing.T) {
 	}
 
 	store := gjson.Get(outputStr, "store")
-	if store.Bool() {
-		t.Error("Store should be set to false by conversion")
+	if store.Exists() {
+		t.Error("Store should be removed from Codex requests")
 	}
 }
 
@@ -202,8 +202,8 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 
 	// Verify other required fields for Codex
 	store := gjson.Get(outputStr, "store")
-	if store.Bool() {
-		t.Error("Store should be false")
+	if store.Exists() {
+		t.Error("Store should be removed from Codex requests")
 	}
 
 	parallelCalls := gjson.Get(outputStr, "parallel_tool_calls")
@@ -264,18 +264,18 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 	}
 }
 
-func TestUserFieldDeletion(t *testing.T) {  
+func TestUserFieldDeletion(t *testing.T) {
 	inputJSON := []byte(`{  
 		"model": "gpt-5.2",  
 		"user": "test-user",  
 		"input": [{"role": "user", "content": "Hello"}]  
-	}`)  
-	  
-	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)  
-	outputStr := string(output)  
-	  
-	// Verify user field is deleted  
-	userField := gjson.Get(outputStr, "user")  
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	// Verify user field is deleted
+	userField := gjson.Get(outputStr, "user")
 	if userField.Exists() {
 		t.Errorf("user field should be deleted, but it was found with value: %s", userField.Raw)
 	}

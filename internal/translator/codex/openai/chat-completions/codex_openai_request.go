@@ -338,7 +338,6 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		}
 	}
 
-	out, _ = sjson.Set(out, "store", false)
 	return []byte(out)
 }
 
