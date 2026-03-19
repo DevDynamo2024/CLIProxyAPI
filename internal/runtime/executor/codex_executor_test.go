@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requesttrace"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -278,6 +279,13 @@ func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
 	}
 	if got := gjson.GetBytes(seenBody, "service_tier").String(); got != "priority" {
 		t.Fatalf("service_tier = %q, want %q (payload=%s)", got, "priority", string(seenBody))
+	}
+	trace := requesttrace.APIKeyPolicyTraceFromGin(ginCtx)
+	if trace == nil || !trace.FastModeApplied {
+		t.Fatalf("expected fast mode trace to be applied, got %#v", trace)
+	}
+	if trace.ServiceTier != "priority" {
+		t.Fatalf("service tier trace = %q, want priority", trace.ServiceTier)
 	}
 }
 

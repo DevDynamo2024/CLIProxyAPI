@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requesttrace"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -126,11 +127,31 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 				budgetModel = routed
 			}
 		}
+		if policyEntry != nil && policyEntry.FastModeEnabled() {
+			requesttrace.UpsertAPIKeyPolicyTraceOnGin(c, func(trace *requesttrace.APIKeyPolicyTrace) {
+				trace.APIKey = apiKey
+				trace.FastModeEnabled = true
+				if strings.TrimSpace(budgetModel) != "" {
+					trace.Model = budgetModel
+				}
+				if strings.TrimSpace(trace.Source) == "" {
+					trace.Source = "api_key_policy"
+				}
+			})
+		}
 		if policyEntry != nil && policyEntry.FastModeEnabled() && modelSupportsPriorityServiceTier(budgetModel) {
 			if updated, errSet := sjson.SetBytes(bodyBytes, "service_tier", "priority"); errSet == nil {
 				bodyBytes = updated
 				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 				c.Request.ContentLength = int64(len(bodyBytes))
+				requesttrace.UpsertAPIKeyPolicyTraceOnGin(c, func(trace *requesttrace.APIKeyPolicyTrace) {
+					trace.APIKey = apiKey
+					trace.FastModeEnabled = true
+					trace.FastModeApplied = true
+					trace.ServiceTier = "priority"
+					trace.Model = budgetModel
+					trace.Source = "api_key_policy_middleware"
+				})
 			}
 		}
 

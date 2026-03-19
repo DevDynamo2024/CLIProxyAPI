@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requesttrace"
 	"github.com/tidwall/gjson"
 )
 
@@ -212,9 +213,18 @@ func TestAPIKeyPolicyMiddleware_FastModeSetsPriorityServiceTier(t *testing.T) {
 	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, nil))
 	r.POST("/v1/chat/completions", func(c *gin.Context) {
 		body, _ := io.ReadAll(c.Request.Body)
+		trace := requesttrace.APIKeyPolicyTraceFromGin(c)
+		traceApplied := false
+		traceSource := ""
+		if trace != nil {
+			traceApplied = trace.FastModeApplied
+			traceSource = trace.Source
+		}
 		c.JSON(200, gin.H{
-			"model":        gjson.GetBytes(body, "model").String(),
-			"service_tier": gjson.GetBytes(body, "service_tier").String(),
+			"model":         gjson.GetBytes(body, "model").String(),
+			"service_tier":  gjson.GetBytes(body, "service_tier").String(),
+			"trace_applied": traceApplied,
+			"trace_source":  traceSource,
 		})
 	})
 
@@ -227,6 +237,12 @@ func TestAPIKeyPolicyMiddleware_FastModeSetsPriorityServiceTier(t *testing.T) {
 	}
 	if got := gjson.GetBytes(w.Body.Bytes(), "service_tier").String(); got != "priority" {
 		t.Fatalf("service_tier=%q body=%s", got, w.Body.String())
+	}
+	if !gjson.GetBytes(w.Body.Bytes(), "trace_applied").Bool() {
+		t.Fatalf("expected trace_applied=true body=%s", w.Body.String())
+	}
+	if got := gjson.GetBytes(w.Body.Bytes(), "trace_source").String(); got != "api_key_policy_middleware" {
+		t.Fatalf("trace_source=%q body=%s", got, w.Body.String())
 	}
 }
 

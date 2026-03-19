@@ -7,6 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/policy"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requesttrace"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -29,19 +31,41 @@ func apiKeyPolicyFromContext(ctx context.Context) *config.APIKeyPolicy {
 	return p
 }
 
-func fastModeEnabledForContext(ctx context.Context) bool {
-	p := apiKeyPolicyFromContext(ctx)
-	return p != nil && p.FastModeEnabled()
-}
-
 func applyPriorityServiceTier(body []byte, ctx context.Context) []byte {
-	if len(body) == 0 || !fastModeEnabledForContext(ctx) {
+	if len(body) == 0 {
 		return body
 	}
+	policyEntry := apiKeyPolicyFromContext(ctx)
+	if policyEntry == nil || !policyEntry.FastModeEnabled() {
+		return body
+	}
+
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	requesttrace.UpsertAPIKeyPolicyTraceOnContext(ctx, func(trace *requesttrace.APIKeyPolicyTrace) {
+		trace.APIKey = policyEntry.APIKey
+		trace.FastModeEnabled = true
+		if model != "" {
+			trace.Model = model
+		}
+		if strings.TrimSpace(trace.Source) == "" {
+			trace.Source = "api_key_policy"
+		}
+	})
+
 	updated, err := sjson.SetBytes(body, "service_tier", "priority")
 	if err != nil {
 		return body
 	}
+	requesttrace.UpsertAPIKeyPolicyTraceOnContext(ctx, func(trace *requesttrace.APIKeyPolicyTrace) {
+		trace.APIKey = policyEntry.APIKey
+		trace.FastModeEnabled = true
+		trace.FastModeApplied = true
+		trace.ServiceTier = "priority"
+		if model != "" {
+			trace.Model = model
+		}
+		trace.Source = "executor"
+	})
 	return updated
 }
 

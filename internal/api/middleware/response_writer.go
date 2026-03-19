@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/requesttrace"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -327,14 +330,22 @@ func (w *ResponseWriterWrapper) cloneHeaders() map[string][]string {
 }
 
 func (w *ResponseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
+	var data []byte
 	apiRequest, isExist := c.Get("API_REQUEST")
-	if !isExist {
-		return nil
+	if isExist {
+		raw, ok := apiRequest.([]byte)
+		if ok && len(raw) > 0 {
+			data = append(data, raw...)
+		}
 	}
-	data, ok := apiRequest.([]byte)
-	if !ok || len(data) == 0 {
-		return nil
+
+	if policySection := formatAPIKeyPolicyTrace(c); len(policySection) > 0 {
+		if len(data) > 0 && !bytes.HasSuffix(data, []byte("\n")) {
+			data = append(data, '\n')
+		}
+		data = append(data, policySection...)
 	}
+
 	return data
 }
 
@@ -407,4 +418,30 @@ func (w *ResponseWriterWrapper) logRequest(statusCode int, headers map[string][]
 		w.requestInfo.Timestamp,
 		apiResponseTimestamp,
 	)
+}
+
+func formatAPIKeyPolicyTrace(c *gin.Context) []byte {
+	trace := requesttrace.APIKeyPolicyTraceFromGin(c)
+	if trace == nil || !trace.FastModeEnabled {
+		return nil
+	}
+
+	var builder strings.Builder
+	builder.WriteString("=== API KEY POLICY ===\n")
+	if apiKey := strings.TrimSpace(trace.APIKey); apiKey != "" {
+		builder.WriteString(fmt.Sprintf("API Key: %s\n", util.HideAPIKey(apiKey)))
+	}
+	builder.WriteString(fmt.Sprintf("Fast Mode Enabled: %t\n", trace.FastModeEnabled))
+	builder.WriteString(fmt.Sprintf("Fast Mode Applied: %t\n", trace.FastModeApplied))
+	if serviceTier := strings.TrimSpace(trace.ServiceTier); serviceTier != "" {
+		builder.WriteString(fmt.Sprintf("Service Tier: %s\n", serviceTier))
+	}
+	if model := strings.TrimSpace(trace.Model); model != "" {
+		builder.WriteString(fmt.Sprintf("Model: %s\n", model))
+	}
+	if source := strings.TrimSpace(trace.Source); source != "" {
+		builder.WriteString(fmt.Sprintf("Source: %s\n", source))
+	}
+	builder.WriteString("\n")
+	return []byte(builder.String())
 }
