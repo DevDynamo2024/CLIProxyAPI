@@ -146,6 +146,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
+		localPasswordEnabled := localClient && strings.TrimSpace(h.localPassword) != ""
 		cfg := h.cfg
 		var (
 			allowRemote bool
@@ -200,7 +201,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
+		if secretHash == "" && envSecret == "" && !localPasswordEnabled {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
 			return
 		}
@@ -227,7 +228,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		if localClient {
+		if localPasswordEnabled {
 			if lp := h.localPassword; lp != "" {
 				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
 					c.Next()

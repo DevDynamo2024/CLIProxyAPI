@@ -126,6 +126,37 @@ type APIKeyFailoverPolicy struct {
 	Claude ProviderFailoverPolicy `yaml:"claude,omitempty" json:"claude,omitempty"`
 }
 
+func defaultGlobalClaudeRoutingRules() []ModelRoutingRule {
+	enabled := true
+	return []ModelRoutingRule{
+		{
+			Enabled:             &enabled,
+			FromModel:           "claude-opus-*",
+			TargetModel:         "gpt-5.4(high)",
+			TargetPercent:       100,
+			StickyWindowSeconds: 3600,
+		},
+		{
+			Enabled:             &enabled,
+			FromModel:           "claude-*",
+			TargetModel:         "gpt-5.4(medium)",
+			TargetPercent:       100,
+			StickyWindowSeconds: 3600,
+		},
+	}
+}
+
+func defaultGlobalClaudeFailoverRules() []ModelFailoverRule {
+	return []ModelFailoverRule{
+		{FromModel: "claude-opus-*", TargetModel: "gpt-5.4(high)"},
+		{FromModel: "claude-*", TargetModel: "gpt-5.4(medium)"},
+	}
+}
+
+func hasExplicitClaudeFailoverConfig(p ProviderFailoverPolicy) bool {
+	return p.Enabled || strings.TrimSpace(p.TargetModel) != "" || len(p.Rules) > 0
+}
+
 // RoutedModelFor resolves the effective model that should be executed for a request.
 // It returns the target model and a decision object when routing to target is selected.
 // When no rule matches or the decision keeps the original model, it returns ("", nil).
@@ -367,28 +398,16 @@ func (cfg *Config) EffectiveAPIKeyPolicy(apiKey string) *APIKeyPolicy {
 
 	if !cfg.ShouldRouteClaudeToGPT(key) {
 		if found := cfg.FindAPIKeyPolicy(key); found != nil {
+			if cfg.ClaudeToGPTRoutingEnabled && entry.ClaudeModelsEnabled() && !hasExplicitClaudeFailoverConfig(entry.Failover.Claude) {
+				entry.Failover.Claude.Enabled = true
+				entry.Failover.Claude.Rules = append([]ModelFailoverRule(nil), defaultGlobalClaudeFailoverRules()...)
+			}
 			return &entry
 		}
 		return nil
 	}
 
-	enabled := true
-	entry.ModelRouting.Rules = append([]ModelRoutingRule{
-		{
-			Enabled:             &enabled,
-			FromModel:           "claude-opus-*",
-			TargetModel:         "gpt-5.4(high)",
-			TargetPercent:       100,
-			StickyWindowSeconds: 3600,
-		},
-		{
-			Enabled:             &enabled,
-			FromModel:           "claude-*",
-			TargetModel:         "gpt-5.4(medium)",
-			TargetPercent:       100,
-			StickyWindowSeconds: 3600,
-		},
-	}, entry.ModelRouting.Rules...)
+	entry.ModelRouting.Rules = append(defaultGlobalClaudeRoutingRules(), entry.ModelRouting.Rules...)
 
 	return &entry
 }

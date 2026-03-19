@@ -321,9 +321,10 @@ func (h *ClaudeCodeAPIHandler) sanitizeClientError(c *gin.Context, msg *interfac
 		"component":      "claude_error_sanitize",
 		"status_code":    msg.StatusCode,
 		"upstream_error": raw,
-	}).Warn("suppressing raw Codex usage limit error for Claude client")
+	}).Error("suppressing raw upstream error for Claude client")
 
 	sanitized := *msg
+	sanitized.StatusCode = http.StatusServiceUnavailable
 	sanitized.Error = fmt.Errorf("upstream model temporarily unavailable, please retry later")
 	return &sanitized
 }
@@ -332,7 +333,7 @@ func shouldSuppressClientError(c *gin.Context, msg *interfaces.ErrorMessage) boo
 	if hasCodexFailoverMarker(c) {
 		return true
 	}
-	return shouldSuppressCodexUsageLimitError(msg)
+	return shouldSuppressSensitiveUpstreamError(msg)
 }
 
 func hasCodexFailoverMarker(c *gin.Context) bool {
@@ -350,25 +351,68 @@ func hasCodexFailoverMarker(c *gin.Context) bool {
 	return strings.EqualFold(strings.TrimSpace(provider), "codex")
 }
 
-func shouldSuppressCodexUsageLimitError(msg *interfaces.ErrorMessage) bool {
-	if msg == nil || msg.Error == nil || msg.StatusCode != http.StatusTooManyRequests {
+func shouldSuppressSensitiveUpstreamError(msg *interfaces.ErrorMessage) bool {
+	if msg == nil || msg.Error == nil {
 		return false
 	}
 
-	raw := extractEmbeddedJSON(msg.Error.Error())
-	if raw == "" {
-		return false
-	}
+	raw := strings.TrimSpace(msg.Error.Error())
+	status := msg.StatusCode
+	embedded := extractEmbeddedJSON(raw)
+	envelopeMsg, envelopeType, envelopeCode := extractErrorEnvelopeFields(embedded)
+	combined := strings.ToLower(strings.TrimSpace(strings.Join([]string{
+		raw,
+		envelopeMsg,
+		envelopeType,
+		envelopeCode,
+	}, " ")))
 
-	var payload struct {
-		Error struct {
-			Type string `json:"type"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	switch {
+	case status >= http.StatusInternalServerError:
+		return containsAny(combined,
+			"service unavailable",
+			"temporarily unavailable",
+			"upstream",
+			"gateway",
+			"timeout",
+			"cf-ray",
+			"request id",
+			"request_id",
+			"open1.codes",
+			"api.openai.com",
+			"api.anthropic.com",
+		)
+	case status == http.StatusTooManyRequests:
+		return containsAny(combined,
+			"usage_limit_reached",
+			"model_cooldown",
+			"rate_limit",
+			"too many requests",
+			"cooling down",
+			"reset_seconds",
+			"resets_in_seconds",
+		)
+	case status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return containsAny(combined,
+			"organization has been disabled",
+			"organization disabled",
+			"organization has been suspended",
+			"account disabled",
+			"account suspended",
+			"account banned",
+			"account blocked",
+			"credential",
+			"oauth",
+			"session",
+			"login",
+			"api key",
+			"invalid_api_key",
+			"permission_error",
+			"authentication_error",
+		)
+	default:
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(payload.Error.Type), "usage_limit_reached")
 }
 
 func extractEmbeddedJSON(raw string) string {
@@ -388,6 +432,52 @@ func extractEmbeddedJSON(raw string) string {
 		return ""
 	}
 	return candidate
+}
+
+func extractErrorEnvelopeFields(raw string) (message string, errType string, code string) {
+	if strings.TrimSpace(raw) == "" {
+		return "", "", ""
+	}
+
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", "", ""
+	}
+
+	message = strings.TrimSpace(payload.Error.Message)
+	if message == "" {
+		message = strings.TrimSpace(payload.Message)
+	}
+	errType = strings.TrimSpace(payload.Error.Type)
+	if errType == "" {
+		errType = strings.TrimSpace(payload.Type)
+	}
+	code = strings.TrimSpace(payload.Error.Code)
+	if code == "" {
+		code = strings.TrimSpace(payload.Code)
+	}
+	return message, errType, code
+}
+
+func containsAny(value string, needles ...string) bool {
+	if value == "" {
+		return false
+	}
+	for _, needle := range needles {
+		if needle != "" && strings.Contains(value, strings.ToLower(needle)) {
+			return true
+		}
+	}
+	return false
 }
 
 type claudeErrorDetail struct {

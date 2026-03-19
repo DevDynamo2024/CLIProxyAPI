@@ -20,9 +20,45 @@ var (
 	setupOnce      sync.Once
 	writerMu       sync.Mutex
 	logWriter      *lumberjack.Logger
+	errorLogWriter *lumberjack.Logger
 	ginInfoWriter  *io.PipeWriter
 	ginErrorWriter *io.PipeWriter
 )
+
+type errorFileHook struct {
+	writer    io.Writer
+	formatter log.Formatter
+}
+
+func (h *errorFileHook) Levels() []log.Level {
+	return []log.Level{log.ErrorLevel, log.FatalLevel, log.PanicLevel}
+}
+
+func (h *errorFileHook) Fire(entry *log.Entry) error {
+	if h == nil || h.writer == nil || entry == nil {
+		return nil
+	}
+
+	dup := entry.Dup()
+	dup.Message = entry.Message
+	dup.Level = entry.Level
+	dup.Caller = entry.Caller
+	dup.Buffer = nil
+	formatter := h.formatter
+	if formatter == nil && dup.Logger != nil {
+		formatter = dup.Logger.Formatter
+	}
+	if formatter == nil {
+		formatter = &LogFormatter{}
+	}
+
+	serialized, err := formatter.Format(dup)
+	if err != nil {
+		return err
+	}
+	_, err = h.writer.Write(serialized)
+	return err
+}
 
 // LogFormatter defines a custom log format for logrus.
 // This formatter adds timestamp, level, request ID, and source location to each log entry.
@@ -153,7 +189,8 @@ func ConfigureLogOutput(cfg *config.Config) error {
 
 	logDir := ResolveLogDirectory(cfg)
 
-	protectedPath := ""
+	protectedPaths := []string{}
+	log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
 	if cfg.LoggingToFile {
 		if err := os.MkdirAll(logDir, 0o755); err != nil {
 			return fmt.Errorf("logging: failed to create log directory: %w", err)
@@ -161,24 +198,44 @@ func ConfigureLogOutput(cfg *config.Config) error {
 		if logWriter != nil {
 			_ = logWriter.Close()
 		}
-		protectedPath = filepath.Join(logDir, "main.log")
+		if errorLogWriter != nil {
+			_ = errorLogWriter.Close()
+		}
+		mainLogPath := filepath.Join(logDir, "main.log")
+		errorLogPath := filepath.Join(logDir, "error.log")
+		protectedPaths = append(protectedPaths, mainLogPath, errorLogPath)
 		logWriter = &lumberjack.Logger{
-			Filename:   protectedPath,
+			Filename:   mainLogPath,
+			MaxSize:    10,
+			MaxBackups: 0,
+			MaxAge:     0,
+			Compress:   false,
+		}
+		errorLogWriter = &lumberjack.Logger{
+			Filename:   errorLogPath,
 			MaxSize:    10,
 			MaxBackups: 0,
 			MaxAge:     0,
 			Compress:   false,
 		}
 		log.SetOutput(logWriter)
+		log.AddHook(&errorFileHook{
+			writer:    errorLogWriter,
+			formatter: log.StandardLogger().Formatter,
+		})
 	} else {
 		if logWriter != nil {
 			_ = logWriter.Close()
 			logWriter = nil
 		}
+		if errorLogWriter != nil {
+			_ = errorLogWriter.Close()
+			errorLogWriter = nil
+		}
 		log.SetOutput(os.Stdout)
 	}
 
-	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPath)
+	configureLogDirCleanerLocked(logDir, cfg.LogsMaxTotalSizeMB, protectedPaths...)
 	return nil
 }
 
@@ -187,10 +244,16 @@ func closeLogOutputs() {
 	defer writerMu.Unlock()
 
 	stopLogDirCleanerLocked()
+	log.StandardLogger().ReplaceHooks(make(log.LevelHooks))
+	log.SetOutput(os.Stdout)
 
 	if logWriter != nil {
 		_ = logWriter.Close()
 		logWriter = nil
+	}
+	if errorLogWriter != nil {
+		_ = errorLogWriter.Close()
+		errorLogWriter = nil
 	}
 	if ginInfoWriter != nil {
 		_ = ginInfoWriter.Close()

@@ -15,6 +15,8 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
+func boolPtr(v bool) *bool { return &v }
+
 type failStatusExecutor struct {
 	id     string
 	status int
@@ -368,6 +370,51 @@ func TestExecuteWithAuthManager_ClaudeFailoverAuthUnavailable(t *testing.T) {
 			},
 		},
 	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{"model":"claude-opus-4-6","stream":false}`)
+	resp, errMsg := handler.ExecuteWithAuthManager(ctx, "claude", "claude-opus-4-6", payload, "")
+	if errMsg != nil {
+		t.Fatalf("expected nil error, got: %+v", errMsg)
+	}
+	if string(resp) != "ok" {
+		t.Fatalf("expected ok, got %q", string(resp))
+	}
+}
+
+func TestExecuteWithAuthManager_ClaudeOptInFallsBackWhenNoClaudeAuthAvailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&okExecutor{id: "codex", payload: []byte("ok")})
+
+	codexAuth := &coreauth.Auth{ID: "codex-auth", Provider: "codex", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("manager.Register(codex): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	cfg := &internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{ClaudeToGPTRoutingEnabled: true},
+		APIKeyPolicies: []internalconfig.APIKeyPolicy{
+			{APIKey: "client-key", EnableClaudeModels: boolPtr(true)},
+		},
+	}
+	policy := cfg.EffectiveAPIKeyPolicy("client-key")
+	if policy == nil {
+		t.Fatal("expected synthesized api key policy")
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", policy)
 
 	ctx := context.WithValue(context.Background(), "gin", c)
 	payload := []byte(`{"model":"claude-opus-4-6","stream":false}`)

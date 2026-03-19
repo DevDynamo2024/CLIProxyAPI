@@ -24,7 +24,8 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
+//   - enableKeepAlive: Whether the local password session should auto-expire without heartbeats
+func StartService(cfg *config.Config, configPath string, localPassword string, enableKeepAlive bool) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -34,7 +35,7 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	defer cancel()
 
 	runCtx := ctxSignal
-	if localPassword != "" {
+	if localPassword != "" && enableKeepAlive {
 		var keepAliveCancel context.CancelFunc
 		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
 		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {

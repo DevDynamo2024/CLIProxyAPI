@@ -116,6 +116,33 @@ func TestConfig_EffectiveAPIKeyPolicy_AddsGlobalClaudeRoutingRules(t *testing.T)
 	}
 }
 
+func TestConfig_EffectiveAPIKeyPolicy_SynthesizesClaudeFailoverForOptInKeys(t *testing.T) {
+	cfg := &Config{
+		SDKConfig: SDKConfig{ClaudeToGPTRoutingEnabled: true},
+		APIKeyPolicies: []APIKeyPolicy{
+			{APIKey: "k1", EnableClaudeModels: boolPtr(true)},
+		},
+	}
+
+	policy := cfg.EffectiveAPIKeyPolicy("k1")
+	if policy == nil {
+		t.Fatal("expected synthesized policy")
+	}
+	if routed, decision := policy.RoutedModelFor("k1", "claude-opus-4-6", time.Unix(0, 0)); decision != nil || routed != "" {
+		t.Fatalf("expected opted-in key to keep Claude routing, got target=%q decision=%+v", routed, decision)
+	}
+
+	target, ok := policy.ClaudeFailoverTargetModelFor("claude-opus-4-6")
+	if !ok || target != "gpt-5.4(high)" {
+		t.Fatalf("expected opus failover target gpt-5.4(high), got target=%q enabled=%v", target, ok)
+	}
+
+	target, ok = policy.ClaudeFailoverTargetModelFor("claude-sonnet-4-6")
+	if !ok || target != "gpt-5.4(medium)" {
+		t.Fatalf("expected sonnet failover target gpt-5.4(medium), got target=%q enabled=%v", target, ok)
+	}
+}
+
 func TestAPIKeyPolicy_ClaudeFailoverTargetModel_DefaultsToMedium(t *testing.T) {
 	policy := &APIKeyPolicy{
 		Failover: APIKeyFailoverPolicy{

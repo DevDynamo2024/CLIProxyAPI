@@ -109,3 +109,35 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestNewServer_EnablesRequestLoggerWhenCommercialModeAndRequestLogEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+
+	cfg := &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			APIKeys:    []string{"test-key"},
+			RequestLog: true,
+		},
+		Port:                   0,
+		AuthDir:                authDir,
+		Debug:                  true,
+		LoggingToFile:          false,
+		UsageStatisticsEnabled: false,
+		CommercialMode:         true,
+	}
+
+	authManager := auth.NewManager(nil, nil, nil)
+	accessManager := sdkaccess.NewManager()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	server := NewServer(cfg, authManager, accessManager, configPath)
+	if server.requestLogger == nil {
+		t.Fatal("expected request logger to be initialized when request-log=true in commercial mode")
+	}
+}

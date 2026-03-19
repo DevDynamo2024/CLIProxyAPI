@@ -18,6 +18,7 @@ import (
 
 const (
 	defaultLogFileName      = "main.log"
+	defaultErrorLogFileName = "error.log"
 	logScannerInitialBuffer = 64 * 1024
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 )
@@ -122,14 +123,14 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		}
 		name := entry.Name()
 		fullPath := filepath.Join(dir, name)
-		if name == defaultLogFileName {
+		if name == defaultLogFileName || name == defaultErrorLogFileName {
 			if errTrunc := os.Truncate(fullPath, 0); errTrunc != nil && !os.IsNotExist(errTrunc) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to truncate log file: %v", errTrunc)})
 				return
 			}
 			continue
 		}
-		if isRotatedLogFile(name) {
+		if isRotatedLogFile(name) || isRotatedLogFileForBase(defaultErrorLogFileName, name) {
 			if errRemove := os.Remove(fullPath); errRemove != nil && !os.IsNotExist(errRemove) {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to remove %s: %v", name, errRemove)})
 				return
@@ -524,21 +525,32 @@ func isRotatedLogFile(name string) bool {
 	return false
 }
 
+func isRotatedLogFileForBase(baseName, name string) bool {
+	if _, ok := rotationOrderForBase(baseName, name); ok {
+		return true
+	}
+	return false
+}
+
 func rotationOrder(name string) (int64, bool) {
-	if order, ok := numericRotationOrder(name); ok {
+	return rotationOrderForBase(defaultLogFileName, name)
+}
+
+func rotationOrderForBase(baseName, name string) (int64, bool) {
+	if order, ok := numericRotationOrder(baseName, name); ok {
 		return order, true
 	}
-	if order, ok := timestampRotationOrder(name); ok {
+	if order, ok := timestampRotationOrder(baseName, name); ok {
 		return order, true
 	}
 	return 0, false
 }
 
-func numericRotationOrder(name string) (int64, bool) {
-	if !strings.HasPrefix(name, defaultLogFileName+".") {
+func numericRotationOrder(baseName, name string) (int64, bool) {
+	if !strings.HasPrefix(name, baseName+".") {
 		return 0, false
 	}
-	suffix := strings.TrimPrefix(name, defaultLogFileName+".")
+	suffix := strings.TrimPrefix(name, baseName+".")
 	if suffix == "" {
 		return 0, false
 	}
@@ -549,9 +561,9 @@ func numericRotationOrder(name string) (int64, bool) {
 	return int64(n), true
 }
 
-func timestampRotationOrder(name string) (int64, bool) {
-	ext := filepath.Ext(defaultLogFileName)
-	base := strings.TrimSuffix(defaultLogFileName, ext)
+func timestampRotationOrder(baseName, name string) (int64, bool) {
+	ext := filepath.Ext(baseName)
+	base := strings.TrimSuffix(baseName, ext)
 	if base == "" {
 		return 0, false
 	}

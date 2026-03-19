@@ -15,7 +15,7 @@ const logDirCleanerInterval = time.Minute
 
 var logDirCleanerCancel context.CancelFunc
 
-func configureLogDirCleanerLocked(logDir string, maxTotalSizeMB int, protectedPath string) {
+func configureLogDirCleanerLocked(logDir string, maxTotalSizeMB int, protectedPaths ...string) {
 	stopLogDirCleanerLocked()
 
 	if maxTotalSizeMB <= 0 {
@@ -34,7 +34,7 @@ func configureLogDirCleanerLocked(logDir string, maxTotalSizeMB int, protectedPa
 
 	ctx, cancel := context.WithCancel(context.Background())
 	logDirCleanerCancel = cancel
-	go runLogDirCleaner(ctx, filepath.Clean(dir), maxBytes, strings.TrimSpace(protectedPath))
+	go runLogDirCleaner(ctx, filepath.Clean(dir), maxBytes, protectedPaths)
 }
 
 func stopLogDirCleanerLocked() {
@@ -45,12 +45,12 @@ func stopLogDirCleanerLocked() {
 	logDirCleanerCancel = nil
 }
 
-func runLogDirCleaner(ctx context.Context, logDir string, maxBytes int64, protectedPath string) {
+func runLogDirCleaner(ctx context.Context, logDir string, maxBytes int64, protectedPaths []string) {
 	ticker := time.NewTicker(logDirCleanerInterval)
 	defer ticker.Stop()
 
 	cleanOnce := func() {
-		deleted, errClean := enforceLogDirSizeLimit(logDir, maxBytes, protectedPath)
+		deleted, errClean := enforceLogDirSizeLimit(logDir, maxBytes, protectedPaths...)
 		if errClean != nil {
 			log.WithError(errClean).Warn("logging: failed to enforce log directory size limit")
 			return
@@ -71,7 +71,7 @@ func runLogDirCleaner(ctx context.Context, logDir string, maxBytes int64, protec
 	}
 }
 
-func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string) (int, error) {
+func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPaths ...string) (int, error) {
 	if maxBytes <= 0 {
 		return 0, nil
 	}
@@ -90,9 +90,13 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 		return 0, errRead
 	}
 
-	protected := strings.TrimSpace(protectedPath)
-	if protected != "" {
-		protected = filepath.Clean(protected)
+	protected := map[string]struct{}{}
+	for _, path := range protectedPaths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		protected[filepath.Clean(path)] = struct{}{}
 	}
 
 	type logFile struct {
@@ -142,7 +146,7 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 		if total <= maxBytes {
 			break
 		}
-		if protected != "" && filepath.Clean(file.path) == protected {
+		if _, ok := protected[filepath.Clean(file.path)]; ok {
 			continue
 		}
 		if errRemove := os.Remove(file.path); errRemove != nil {
