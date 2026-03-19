@@ -282,7 +282,7 @@ func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
 }
 
 func TestNormalizeCodexRequestFieldsStripsStoreForOfficialBackend(t *testing.T) {
-	got := normalizeCodexRequestFields([]byte(`{"input":"hi","store":false}`), "")
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi","store":false}`), nil, "")
 	if gjson.GetBytes(got, "store").Exists() {
 		t.Fatalf("expected store to be removed for official codex backend, got %s", string(got))
 	}
@@ -333,6 +333,20 @@ func TestCodexExecutorSetsStoreFalseForCustomBaseURL(t *testing.T) {
 	}
 	if gjson.GetBytes(got, "store").Bool() {
 		t.Fatalf("expected store=false for custom codex base URL, got %s", string(got))
+	}
+}
+
+func TestNormalizeCodexRequestFieldsSetsStoreFalseForOAuthAuth(t *testing.T) {
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": "oauth-token"},
+	}
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi"}`), auth, "")
+	if !gjson.GetBytes(got, "store").Exists() {
+		t.Fatalf("expected store=false for codex oauth auth, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "store").Bool() {
+		t.Fatalf("expected store=false for codex oauth auth, got %s", string(got))
 	}
 }
 

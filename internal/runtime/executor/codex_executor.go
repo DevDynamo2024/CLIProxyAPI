@@ -118,7 +118,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, baseURL)
+	body = normalizeCodexRequestFields(body, auth, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -214,7 +214,7 @@ func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *clipro
 	}
 	compactBody = util.NormalizeOpenAIToolsPayload(compactBody)
 	compactBody = util.StripOpenAIToolsForImageInputs(compactBody)
-	compactBody = normalizeCodexRequestFields(compactBody, baseURL)
+	compactBody = normalizeCodexRequestFields(compactBody, auth, baseURL)
 	compactBody = applyPriorityServiceTier(compactBody, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -316,7 +316,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, baseURL)
+	body = normalizeCodexRequestFields(body, auth, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -415,7 +415,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, baseURL)
+	body = normalizeCodexRequestFields(body, auth, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -525,7 +525,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, baseURL)
+	body = normalizeCodexRequestFields(body, auth, baseURL)
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -703,7 +703,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	return auth, nil
 }
 
-func normalizeCodexRequestFields(body []byte, baseURL string) []byte {
+func normalizeCodexRequestFields(body []byte, auth *cliproxyauth.Auth, baseURL string) []byte {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
@@ -715,14 +715,36 @@ func normalizeCodexRequestFields(body []byte, baseURL string) []byte {
 	}
 	// Third-party Codex-compatible proxies can require an explicit store=false,
 	// while the official Codex backend prefers the field to be absent.
-	if usesOfficialCodexResponses(baseURL) {
+	if shouldCodexUseExplicitStoreFalse(auth, baseURL) {
+		if updated, err := sjson.SetBytes(out, "store", false); err == nil {
+			out = updated
+		}
+	} else if usesOfficialCodexResponses(baseURL) {
 		if updated, err := sjson.DeleteBytes(out, "store"); err == nil {
 			out = updated
 		}
-	} else if updated, err := sjson.SetBytes(out, "store", false); err == nil {
-		out = updated
 	}
 	return out
+}
+
+func shouldCodexUseExplicitStoreFalse(auth *cliproxyauth.Auth, baseURL string) bool {
+	if !usesOfficialCodexResponses(baseURL) {
+		return true
+	}
+	if auth == nil {
+		return false
+	}
+	if auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["auth_kind"]), "oauth") {
+		return true
+	}
+	if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) == "" {
+		if auth.Metadata != nil {
+			if token, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(token) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func usesOfficialCodexResponses(baseURL string) bool {
