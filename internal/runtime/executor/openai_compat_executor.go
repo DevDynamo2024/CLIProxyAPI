@@ -104,6 +104,8 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 	translated = util.NormalizeOpenAIToolsPayload(translated)
 	translated = util.StripOpenAIToolsForImageInputs(translated)
+	translated = stripUnsupportedOpenAICompatFields(translated)
+	translated = applyPriorityServiceTier(translated, ctx)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -203,6 +205,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
 	translated = util.NormalizeOpenAIToolsPayload(translated)
 	translated = util.StripOpenAIToolsForImageInputs(translated)
+	translated = stripUnsupportedOpenAICompatFields(translated)
+	translated = applyPriorityServiceTier(translated, ctx)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -379,6 +383,19 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 		}
 	}
 	return nil
+}
+
+func stripUnsupportedOpenAICompatFields(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	out := body
+	// Some OpenAI-compatible backends reject the legacy store toggle during Claude -> GPT failover.
+	if updated, err := sjson.DeleteBytes(out, "store"); err == nil {
+		out = updated
+	}
+	return out
 }
 
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {

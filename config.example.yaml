@@ -162,7 +162,6 @@ nonstream-keepalive-interval: 0
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
-#     fast-mode: true # optional: force this key to use service_tier=priority for upstream requests
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     headers:

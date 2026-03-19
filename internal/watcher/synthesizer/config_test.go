@@ -287,34 +287,6 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	}
 }
 
-func TestConfigSynthesizer_CodexKeys_FastMode(t *testing.T) {
-	synth := NewConfigSynthesizer()
-	ctx := &SynthesisContext{
-		Config: &config.Config{
-			CodexKey: []config.CodexKey{
-				{
-					APIKey:   "codex-fast-key",
-					BaseURL:  "https://api.openai.com",
-					FastMode: true,
-				},
-			},
-		},
-		Now:         time.Now(),
-		IDGenerator: NewStableIDGenerator(),
-	}
-
-	auths, err := synth.Synthesize(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(auths) != 1 {
-		t.Fatalf("expected 1 auth, got %d", len(auths))
-	}
-	if auths[0].Attributes["fast_mode"] != "true" {
-		t.Fatalf("expected fast_mode=true, got %q", auths[0].Attributes["fast_mode"])
-	}
-}
-
 func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -262,15 +263,14 @@ func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
 	defer srv.Close()
 
 	exec := NewCodexExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":   "test",
-		"base_url":  srv.URL,
-		"fast_mode": "true",
-	}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
 	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi"}`)}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("apiKeyPolicy", &config.APIKeyPolicy{APIKey: "client-key", FastMode: true})
+	ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), "gin", ginCtx), 5*time.Second)
 	defer cancel()
 
 	if _, err := exec.Execute(ctx, auth, req, opts); err != nil {

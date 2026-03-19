@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -54,6 +55,37 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorCompactStripsStoreBeforeUpstream(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","input":"hi","store":false}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Alt:          "responses/compact",
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gjson.GetBytes(gotBody, "store").Exists() {
+		t.Fatalf("expected store to be removed before upstream compact request, got %s", string(gotBody))
 	}
 }
 
@@ -114,5 +146,78 @@ func TestOpenAICompatExecutorDropsToolsForImageInputs(t *testing.T) {
 	}
 	if gjson.GetBytes(resp.Payload, "choices.0.message.content").String() != "ok" {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+}
+
+func TestOpenAICompatExecutorFastModeSetsPriorityServiceTier(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Set("apiKeyPolicy", &config.APIKeyPolicy{APIKey: "client-key", FastMode: true})
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if got := gjson.GetBytes(gotBody, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want %q (payload=%s)", got, "priority", string(gotBody))
+	}
+}
+
+func TestOpenAICompatExecutorStreamStripsStoreBeforeUpstream(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = body
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+
+	stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.4",
+		Payload: []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"store":false}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range stream {
+		if chunk.Err != nil {
+			t.Fatalf("stream error: %v", chunk.Err)
+		}
+	}
+	if gjson.GetBytes(gotBody, "store").Exists() {
+		t.Fatalf("expected store to be removed before upstream streaming request, got %s", string(gotBody))
 	}
 }

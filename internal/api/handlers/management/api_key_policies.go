@@ -65,6 +65,7 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		Claude *providerFailoverPatch `json:"claude"`
 	}
 	type policyPatch struct {
+		FastMode             *bool              `json:"fast-mode"`
 		EnableClaudeModels   *bool              `json:"enable-claude-models"`
 		EnableClaudeOpus1M   *bool              `json:"enable-claude-opus-1m"`
 		ModelRouting         *modelRoutingPatch `json:"model-routing"`
@@ -124,6 +125,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	if body.Value.EnableClaudeModels != nil {
 		v := *body.Value.EnableClaudeModels
 		entry.EnableClaudeModels = &v
+	}
+	if body.Value.FastMode != nil {
+		entry.FastMode = *body.Value.FastMode
 	}
 	if body.Value.EnableClaudeOpus1M != nil {
 		v := *body.Value.EnableClaudeOpus1M

@@ -13,6 +13,10 @@ import (
 type APIKeyPolicy struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// FastMode forces OpenAI-compatible upstream requests for this client API key
+	// to use the priority service tier when the target model supports it.
+	FastMode bool `yaml:"fast-mode,omitempty" json:"fast-mode,omitempty"`
+
 	// EnableClaudeModels disables the global Claude -> GPT routing override for this API key.
 	// It only takes effect when claude-to-gpt-routing-enabled is true.
 	EnableClaudeModels *bool `yaml:"enable-claude-models,omitempty" json:"enable-claude-models,omitempty"`
@@ -272,6 +276,13 @@ func (p *APIKeyPolicy) ClaudeOpus1MEnabled() bool {
 		return false
 	}
 	return *p.EnableClaudeOpus1M
+}
+
+func (p *APIKeyPolicy) FastModeEnabled() bool {
+	if p == nil {
+		return false
+	}
+	return p.FastMode
 }
 
 // WeeklyBudgetBounds resolves the active weekly budget window for the policy.

@@ -24,6 +24,24 @@ const (
 	claudeOpus1MBetaName   = "context-1m-2025-08-07"
 )
 
+func modelSupportsPriorityServiceTier(model string) bool {
+	key := policy.NormaliseModelKey(model)
+	switch {
+	case strings.HasPrefix(key, "gpt-"):
+		return true
+	case strings.HasPrefix(key, "chatgpt-"):
+		return true
+	case strings.HasPrefix(key, "o1"):
+		return true
+	case strings.HasPrefix(key, "o3"):
+		return true
+	case strings.HasPrefix(key, "o4"):
+		return true
+	default:
+		return false
+	}
+}
+
 type priceResolver interface {
 	ResolvePriceMicro(ctx context.Context, model string) (billing.PriceMicroUSDPer1M, string, int64, error)
 }
@@ -106,6 +124,13 @@ func APIKeyPolicyMiddleware(getConfig func() *config.Config, limiter *policy.SQL
 		if policyEntry != nil {
 			if routed, decision := policyEntry.RoutedModelFor(apiKey, effectiveModel, requestNow); decision != nil && strings.TrimSpace(routed) != "" {
 				budgetModel = routed
+			}
+		}
+		if policyEntry != nil && policyEntry.FastModeEnabled() && modelSupportsPriorityServiceTier(budgetModel) {
+			if updated, errSet := sjson.SetBytes(bodyBytes, "service_tier", "priority"); errSet == nil {
+				bodyBytes = updated
+				c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+				c.Request.ContentLength = int64(len(bodyBytes))
 			}
 		}
 

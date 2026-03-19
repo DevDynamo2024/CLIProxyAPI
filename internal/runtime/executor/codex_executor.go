@@ -119,7 +119,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
 	body = stripUnsupportedCodexFields(body)
-	body = applyCodexFastMode(body, auth)
+	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -215,7 +215,7 @@ func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *clipro
 	compactBody = util.NormalizeOpenAIToolsPayload(compactBody)
 	compactBody = util.StripOpenAIToolsForImageInputs(compactBody)
 	compactBody = stripUnsupportedCodexFields(compactBody)
-	compactBody = applyCodexFastMode(compactBody, auth)
+	compactBody = applyPriorityServiceTier(compactBody, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, compactBody)
@@ -317,7 +317,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
 	body = stripUnsupportedCodexFields(body)
-	body = applyCodexFastMode(body, auth)
+	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -416,7 +416,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
 	body = stripUnsupportedCodexFields(body)
-	body = applyCodexFastMode(body, auth)
+	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := e.cacheHelper(ctx, from, url, req, body)
@@ -717,29 +717,6 @@ func stripUnsupportedCodexFields(body []byte) []byte {
 		out = updated
 	}
 	return out
-}
-
-func applyCodexFastMode(body []byte, auth *cliproxyauth.Auth) []byte {
-	if len(body) == 0 || !codexFastModeEnabled(auth) {
-		return body
-	}
-	updated, err := sjson.SetBytes(body, "service_tier", "priority")
-	if err != nil {
-		return body
-	}
-	return updated
-}
-
-func codexFastModeEnabled(auth *cliproxyauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(auth.Attributes["fast_mode"])) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
 }
 
 func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Format, url string, req cliproxyexecutor.Request, rawJSON []byte) (*http.Request, error) {

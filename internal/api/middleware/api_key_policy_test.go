@@ -195,6 +195,41 @@ func TestAPIKeyPolicyMiddleware_ExcludedChatGPTWildcardDenied(t *testing.T) {
 	}
 }
 
+func TestAPIKeyPolicyMiddleware_FastModeSetsPriorityServiceTier(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{
+		APIKeyPolicies: []config.APIKeyPolicy{
+			{APIKey: "k", FastMode: true},
+		},
+	}
+	cfg.SanitizeAPIKeyPolicies()
+
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("apiKey", "k")
+		c.Next()
+	})
+	r.Use(APIKeyPolicyMiddleware(func() *config.Config { return cfg }, nil, nil))
+	r.POST("/v1/chat/completions", func(c *gin.Context) {
+		body, _ := io.ReadAll(c.Request.Body)
+		c.JSON(200, gin.H{
+			"model":        gjson.GetBytes(body, "model").String(),
+			"service_tier": gjson.GetBytes(body, "service_tier").String(),
+		})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-5.4(high)"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := gjson.GetBytes(w.Body.Bytes(), "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier=%q body=%s", got, w.Body.String())
+	}
+}
+
 func TestAPIKeyPolicyMiddleware_ExcludedRequestedCategoryDoesNotBlockRoutingTarget(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{
