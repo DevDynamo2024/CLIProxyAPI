@@ -3,13 +3,16 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -330,6 +333,96 @@ func TestExecuteWithAuthManager_ClaudeFailoverUnknownProvider(t *testing.T) {
 	}
 	if string(resp) != "ok" {
 		t.Fatalf("expected ok, got %q", string(resp))
+	}
+}
+
+func TestExecuteWithAuthManager_ClaudeFailoverToCustomCodexStripsInclude(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var mu sync.Mutex
+	var seenBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		mu.Lock()
+		seenBody = append([]byte(nil), body...)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&failStatusExecutor{id: "claude", status: http.StatusTooManyRequests, msg: "weekly cap"})
+	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(&internalconfig.Config{}))
+
+	claudeAuth := &coreauth.Auth{ID: "claude-auth-strip-include", Provider: "claude", Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), claudeAuth); err != nil {
+		t.Fatalf("manager.Register(claude): %v", err)
+	}
+	codexAuth := &coreauth.Auth{
+		ID:       "codex-auth-strip-include",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":  "test",
+			"base_url": srv.URL,
+		},
+	}
+	if _, err := manager.Register(context.Background(), codexAuth); err != nil {
+		t.Fatalf("manager.Register(codex): %v", err)
+	}
+
+	registry.GetGlobalRegistry().RegisterClient(claudeAuth.ID, claudeAuth.Provider, []*registry.ModelInfo{{ID: "claude-sonnet-4-6"}})
+	registry.GetGlobalRegistry().RegisterClient(codexAuth.ID, codexAuth.Provider, []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(claudeAuth.ID)
+		registry.GetGlobalRegistry().UnregisterClient(codexAuth.ID)
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`)))
+	c.Set("apiKey", "client-key")
+	c.Set("apiKeyPolicy", &internalconfig.APIKeyPolicy{
+		APIKey: "client-key",
+		Failover: internalconfig.APIKeyFailoverPolicy{
+			Claude: internalconfig.ProviderFailoverPolicy{
+				Enabled:     true,
+				TargetModel: "gpt-5.4(high)",
+			},
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), "gin", c)
+	payload := []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"}]}
+		],
+		"stream":false
+	}`)
+	if _, errMsg := handler.ExecuteWithAuthManager(ctx, "claude", "claude-sonnet-4-6", payload, ""); errMsg != nil {
+		t.Fatalf("expected nil error, got: %+v", errMsg)
+	}
+
+	mu.Lock()
+	got := append([]byte(nil), seenBody...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("expected upstream request body to be captured")
+	}
+	if bytes.Contains(got, []byte(`"include"`)) {
+		t.Fatalf("expected include to be stripped before custom codex upstream request, got %s", string(got))
 	}
 }
 

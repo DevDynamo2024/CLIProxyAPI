@@ -152,7 +152,50 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						flushMessage()
 						functionCallOutputMessage := `{"type":"function_call_output"}`
 						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
-						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+
+						contentResult := messageContentResult.Get("content")
+						if contentResult.IsArray() {
+							toolResultContentIndex := 0
+							toolResultContent := `[]`
+							contentResults := contentResult.Array()
+							for k := 0; k < len(contentResults); k++ {
+								toolResultContentType := contentResults[k].Get("type").String()
+								if toolResultContentType == "image" {
+									sourceResult := contentResults[k].Get("source")
+									if sourceResult.Exists() {
+										data := sourceResult.Get("data").String()
+										if data == "" {
+											data = sourceResult.Get("base64").String()
+										}
+										if data != "" {
+											mediaType := sourceResult.Get("media_type").String()
+											if mediaType == "" {
+												mediaType = sourceResult.Get("mime_type").String()
+											}
+											if mediaType == "" {
+												mediaType = "application/octet-stream"
+											}
+											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
+
+											toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_image")
+											toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.image_url", toolResultContentIndex), dataURL)
+											toolResultContentIndex++
+										}
+									}
+								} else if toolResultContentType == "text" {
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
+									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), contentResults[k].Get("text").String())
+									toolResultContentIndex++
+								}
+							}
+							if toolResultContent != `[]` {
+								functionCallOutputMessage, _ = sjson.SetRaw(functionCallOutputMessage, "output", toolResultContent)
+							} else {
+								functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+							}
+						} else {
+							functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+						}
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallOutputMessage)
 					}
 				}
@@ -182,12 +225,6 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		shortMap := buildShortNameMap(names)
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
-			// Special handling: map Claude web search tool to Codex web_search
-			if toolResult.Get("type").String() == "web_search_20250305" {
-				// Replace the tool content entirely with {"type":"web_search"}
-				template, _ = sjson.SetRaw(template, "tools.-1", `{"type":"web_search"}`)
-				continue
-			}
 			tool := toolResult.Raw
 			tool, _ = sjson.Set(tool, "type", "function")
 			// Apply shortened name if needed

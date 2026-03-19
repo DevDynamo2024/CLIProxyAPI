@@ -239,8 +239,61 @@ func TestCodexExecutorStripsToolChoiceForClaudeFailoverRequests(t *testing.T) {
 	if gjson.GetBytes(got, "tool_choice").Exists() {
 		t.Fatalf("expected tool_choice to be removed for Claude failover, got %s", string(got))
 	}
-	if gjson.GetBytes(got, "store").Exists() {
-		t.Fatalf("expected store to be removed for Claude failover, got %s", string(got))
+	if !gjson.GetBytes(got, "store").Exists() {
+		t.Fatalf("expected store=false for Claude failover, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "store").Bool() {
+		t.Fatalf("expected store=false for Claude failover, got %s", string(got))
+	}
+}
+
+func TestCodexExecutorStripsIncludeForClaudeFailoverOnCustomBaseURL(t *testing.T) {
+	var mu sync.Mutex
+	var seenBody []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		mu.Lock()
+		seenBody = b
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	exec := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"hi"}]}
+		]
+	}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := exec.Execute(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]byte(nil), seenBody...)
+	mu.Unlock()
+	if len(got) == 0 {
+		t.Fatalf("upstream body is empty")
+	}
+	if gjson.GetBytes(got, "include").Exists() {
+		t.Fatalf("expected include to be stripped for Claude failover on custom codex backend, got %s", string(got))
 	}
 }
 
@@ -290,12 +343,26 @@ func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
 }
 
 func TestNormalizeCodexRequestFieldsSetsStoreFalse(t *testing.T) {
-	got := normalizeCodexRequestFields([]byte(`{"input":"hi"}`))
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi"}`), "")
 	if !gjson.GetBytes(got, "store").Exists() {
 		t.Fatalf("expected store=false for codex requests, got %s", string(got))
 	}
 	if gjson.GetBytes(got, "store").Bool() {
 		t.Fatalf("expected store=false for codex requests, got %s", string(got))
+	}
+}
+
+func TestNormalizeCodexRequestFieldsKeepsIncludeForOfficialBaseURL(t *testing.T) {
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi","include":["reasoning.encrypted_content"]}`), "https://chatgpt.com/backend-api/codex")
+	if !gjson.GetBytes(got, "include").Exists() {
+		t.Fatalf("expected include to be preserved for official codex backend, got %s", string(got))
+	}
+}
+
+func TestNormalizeCodexRequestFieldsStripsIncludeForCustomBaseURL(t *testing.T) {
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi","include":["reasoning.encrypted_content"]}`), "https://example.com")
+	if gjson.GetBytes(got, "include").Exists() {
+		t.Fatalf("expected include to be stripped for custom codex backend, got %s", string(got))
 	}
 }
 
@@ -322,7 +389,7 @@ func TestCodexExecutorSetsStoreFalseForCustomBaseURL(t *testing.T) {
 
 	exec := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
-	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi"}`)}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi","include":["reasoning.encrypted_content"]}`)}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -345,10 +412,13 @@ func TestCodexExecutorSetsStoreFalseForCustomBaseURL(t *testing.T) {
 	if gjson.GetBytes(got, "store").Bool() {
 		t.Fatalf("expected store=false for custom codex base URL, got %s", string(got))
 	}
+	if gjson.GetBytes(got, "include").Exists() {
+		t.Fatalf("expected include to be stripped for custom codex base URL, got %s", string(got))
+	}
 }
 
 func TestNormalizeCodexRequestFieldsSetsStoreFalseForOAuthAuth(t *testing.T) {
-	got := normalizeCodexRequestFields([]byte(`{"input":"hi"}`))
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi"}`), "")
 	if !gjson.GetBytes(got, "store").Exists() {
 		t.Fatalf("expected store=false for codex oauth auth, got %s", string(got))
 	}

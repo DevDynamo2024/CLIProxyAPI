@@ -118,7 +118,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body)
+	body = normalizeCodexRequestFields(body, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -214,7 +214,7 @@ func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *clipro
 	}
 	compactBody = util.NormalizeOpenAIToolsPayload(compactBody)
 	compactBody = util.StripOpenAIToolsForImageInputs(compactBody)
-	compactBody = normalizeCodexRequestFields(compactBody)
+	compactBody = normalizeCodexRequestFields(compactBody, baseURL)
 	compactBody = applyPriorityServiceTier(compactBody, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -316,7 +316,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body)
+	body = normalizeCodexRequestFields(body, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -415,7 +415,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body)
+	body = normalizeCodexRequestFields(body, baseURL)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -523,7 +523,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body)
+	body = normalizeCodexRequestFields(body, "")
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -701,7 +701,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	return auth, nil
 }
 
-func normalizeCodexRequestFields(body []byte) []byte {
+func normalizeCodexRequestFields(body []byte, baseURL string) []byte {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
@@ -715,6 +715,14 @@ func normalizeCodexRequestFields(body []byte) []byte {
 	// always forward store=false to Codex upstreams.
 	if updated, err := sjson.SetBytes(out, "store", false); err == nil {
 		out = updated
+	}
+	// The encrypted reasoning include list is only supported by the official Codex
+	// backend. Custom/OpenAI-compatible Responses backends can reject it with:
+	//   Unknown parameter: 'include'
+	if !usesOfficialCodexResponses(baseURL) {
+		if updated, err := sjson.DeleteBytes(out, "include"); err == nil {
+			out = updated
+		}
 	}
 	return out
 }
