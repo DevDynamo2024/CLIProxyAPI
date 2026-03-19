@@ -281,7 +281,14 @@ func TestCodexExecuteFastModeSetsPriorityServiceTier(t *testing.T) {
 	}
 }
 
-func TestCodexExecutorStripsStoreBeforeUpstream(t *testing.T) {
+func TestNormalizeCodexRequestFieldsStripsStoreForOfficialBackend(t *testing.T) {
+	got := normalizeCodexRequestFields([]byte(`{"input":"hi","store":false}`), "")
+	if gjson.GetBytes(got, "store").Exists() {
+		t.Fatalf("expected store to be removed for official codex backend, got %s", string(got))
+	}
+}
+
+func TestCodexExecutorSetsStoreFalseForCustomBaseURL(t *testing.T) {
 	var mu sync.Mutex
 	var seenBody []byte
 
@@ -304,7 +311,7 @@ func TestCodexExecutorStripsStoreBeforeUpstream(t *testing.T) {
 
 	exec := NewCodexExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": srv.URL}}
-	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi","store":false}`)}
+	req := cliproxyexecutor.Request{Model: "gpt-5.4", Payload: []byte(`{"input":"hi"}`)}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("codex")}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -321,8 +328,11 @@ func TestCodexExecutorStripsStoreBeforeUpstream(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatalf("upstream body is empty")
 	}
-	if gjson.GetBytes(got, "store").Exists() {
-		t.Fatalf("expected store to be removed before upstream request, got %s", string(got))
+	if !gjson.GetBytes(got, "store").Exists() {
+		t.Fatalf("expected store=false for custom codex base URL, got %s", string(got))
+	}
+	if gjson.GetBytes(got, "store").Bool() {
+		t.Fatalf("expected store=false for custom codex base URL, got %s", string(got))
 	}
 }
 
