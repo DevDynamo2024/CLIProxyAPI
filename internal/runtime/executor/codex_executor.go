@@ -118,7 +118,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, auth, baseURL)
+	body = normalizeCodexRequestFields(body)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -214,7 +214,7 @@ func (e *CodexExecutor) executeCompactFallback(ctx context.Context, auth *clipro
 	}
 	compactBody = util.NormalizeOpenAIToolsPayload(compactBody)
 	compactBody = util.StripOpenAIToolsForImageInputs(compactBody)
-	compactBody = normalizeCodexRequestFields(compactBody, auth, baseURL)
+	compactBody = normalizeCodexRequestFields(compactBody)
 	compactBody = applyPriorityServiceTier(compactBody, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -316,7 +316,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body, _ = sjson.DeleteBytes(body, "stream")
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, auth, baseURL)
+	body = normalizeCodexRequestFields(body)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
@@ -415,7 +415,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, auth, baseURL)
+	body = normalizeCodexRequestFields(body)
 	body = applyPriorityServiceTier(body, ctx)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
@@ -504,8 +504,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	_, baseURL := codexCreds(auth)
-
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
@@ -525,7 +523,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	}
 	body = util.NormalizeOpenAIToolsPayload(body)
 	body = util.StripOpenAIToolsForImageInputs(body)
-	body = normalizeCodexRequestFields(body, auth, baseURL)
+	body = normalizeCodexRequestFields(body)
 
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
@@ -703,7 +701,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	return auth, nil
 }
 
-func normalizeCodexRequestFields(body []byte, auth *cliproxyauth.Auth, baseURL string) []byte {
+func normalizeCodexRequestFields(body []byte) []byte {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
@@ -713,38 +711,12 @@ func normalizeCodexRequestFields(body []byte, auth *cliproxyauth.Auth, baseURL s
 	if updated, err := sjson.DeleteBytes(out, "tool_choice"); err == nil {
 		out = updated
 	}
-	// Third-party Codex-compatible proxies can require an explicit store=false,
-	// while the official Codex backend prefers the field to be absent.
-	if shouldCodexUseExplicitStoreFalse(auth, baseURL) {
-		if updated, err := sjson.SetBytes(out, "store", false); err == nil {
-			out = updated
-		}
-	} else if usesOfficialCodexResponses(baseURL) {
-		if updated, err := sjson.DeleteBytes(out, "store"); err == nil {
-			out = updated
-		}
+	// Keep Codex behavior aligned with the original CLIProxyAPI translator:
+	// always forward store=false to Codex upstreams.
+	if updated, err := sjson.SetBytes(out, "store", false); err == nil {
+		out = updated
 	}
 	return out
-}
-
-func shouldCodexUseExplicitStoreFalse(auth *cliproxyauth.Auth, baseURL string) bool {
-	if !usesOfficialCodexResponses(baseURL) {
-		return true
-	}
-	if auth == nil {
-		return false
-	}
-	if auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["auth_kind"]), "oauth") {
-		return true
-	}
-	if auth.Attributes == nil || strings.TrimSpace(auth.Attributes["api_key"]) == "" {
-		if auth.Metadata != nil {
-			if token, ok := auth.Metadata["access_token"].(string); ok && strings.TrimSpace(token) != "" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func usesOfficialCodexResponses(baseURL string) bool {
