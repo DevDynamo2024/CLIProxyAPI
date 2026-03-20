@@ -12,6 +12,8 @@ const (
 	claudeOpus46Prefix           = "claude-opus-4-6"
 	claudeOpus45FallbackPrefix   = "claude-opus-4-5-20251101"
 	claudeThinkingSuffixLiteral  = "-thinking"
+	ClaudeGPTTargetFamilyGPT52   = "gpt-5.2"
+	ClaudeGPTTargetFamilyGPT54   = "gpt-5.4"
 	defaultClaudeGPTHighTarget   = "gpt-5.4(high)"
 	defaultClaudeGPTMediumTarget = "gpt-5.4(medium)"
 )
@@ -62,14 +64,43 @@ func IsClaudeModel(model string) bool {
 // DefaultClaudeGPTTarget maps Claude requests to the default GPT target used by
 // the global Claude -> GPT routing feature.
 func DefaultClaudeGPTTarget(model string) (string, bool) {
+	return DefaultClaudeGPTTargetForFamily(model, "")
+}
+
+// NormalizeClaudeGPTTargetFamily returns a canonical GPT family ID for Claude -> GPT routing.
+// Unsupported values are normalized to "" so callers can fall back to the default family.
+func NormalizeClaudeGPTTargetFamily(value string) string {
+	switch NormaliseModelKey(value) {
+	case ClaudeGPTTargetFamilyGPT52:
+		return ClaudeGPTTargetFamilyGPT52
+	case ClaudeGPTTargetFamilyGPT54:
+		return ClaudeGPTTargetFamilyGPT54
+	default:
+		return ""
+	}
+}
+
+// EffectiveClaudeGPTTargetFamily resolves the configured Claude -> GPT family,
+// defaulting to gpt-5.4 when unset or invalid.
+func EffectiveClaudeGPTTargetFamily(value string) string {
+	if family := NormalizeClaudeGPTTargetFamily(value); family != "" {
+		return family
+	}
+	return ClaudeGPTTargetFamilyGPT54
+}
+
+// DefaultClaudeGPTTargetForFamily maps Claude requests to the default GPT target
+// used by the global Claude -> GPT routing feature for the selected GPT family.
+func DefaultClaudeGPTTargetForFamily(model, family string) (string, bool) {
 	key := NormaliseModelKey(model)
 	if !strings.HasPrefix(key, claudeModelPrefix) {
 		return "", false
 	}
+	family = EffectiveClaudeGPTTargetFamily(family)
 	if strings.HasPrefix(key, claudeOpusPrefix) {
-		return defaultClaudeGPTHighTarget, true
+		return family + "(high)", true
 	}
-	return defaultClaudeGPTMediumTarget, true
+	return family + "(medium)", true
 }
 
 // MatchWildcard performs case-insensitive matching where '*' matches any substring.

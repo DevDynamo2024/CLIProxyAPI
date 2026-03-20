@@ -144,3 +144,27 @@ func TestAPIKeyPolicy_RoutedModelFor_RulePriority(t *testing.T) {
 		t.Fatalf("expected first matching rule to win (no routing), got target=%q decision=%+v", target, decision)
 	}
 }
+
+func TestAPIKeyPolicy_RoutedModelFor_AllowsGPT52Target(t *testing.T) {
+	p := &APIKeyPolicy{
+		APIKey: "k1",
+		ModelRouting: APIKeyModelRoutingPolicy{
+			Rules: []ModelRoutingRule{
+				{
+					Enabled:       boolPtr(true),
+					FromModel:     "claude-opus-4-6*",
+					TargetModel:   "gpt-5.2(high)",
+					TargetPercent: 100,
+				},
+			},
+		},
+	}
+
+	target, decision := p.RoutedModelFor("k1", "claude-opus-4-6", time.Unix(0, 0))
+	if target != "gpt-5.2(high)" {
+		t.Fatalf("expected gpt-5.2(high), got %q", target)
+	}
+	if decision == nil {
+		t.Fatal("expected routing decision, got nil")
+	}
+}

@@ -95,3 +95,40 @@ func TestConvertClaudeRequestToCodex_WebSearchToolUsesFunctionSemantics(t *testi
 		t.Fatalf("tools.0.input_schema should be removed; raw=%s", string(out))
 	}
 }
+
+func TestConvertClaudeRequestToCodex_PreservesToolReferencePayloadAsJSONString(t *testing.T) {
+	input := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_result",
+						"tool_use_id": "toolu_456",
+						"content": [
+							{"type": "text", "text": "Found 3 relevant results"},
+							{"type": "tool_reference", "tool_name": "web_search", "title": "Reuters", "url": "https://www.reuters.com/example"}
+						]
+					}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertClaudeRequestToCodex("gpt-5.4", input, false)
+
+	if got := gjson.GetBytes(out, "input.0.type").String(); got != "function_call_output" {
+		t.Fatalf("input.0.type = %q, want %q; raw=%s", got, "function_call_output", string(out))
+	}
+	output := gjson.GetBytes(out, "input.0.output").String()
+	if output == "" {
+		t.Fatalf("expected stringified output payload, got empty; raw=%s", string(out))
+	}
+	if !gjson.Valid(output) {
+		t.Fatalf("expected output to contain original JSON array string, got %q", output)
+	}
+	if !gjson.Get(output, `#(type=="tool_reference").url`).Exists() {
+		t.Fatalf("expected tool_reference URL to be preserved in output, got %q", output)
+	}
+}

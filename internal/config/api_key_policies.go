@@ -21,6 +21,11 @@ type APIKeyPolicy struct {
 	// It only takes effect when claude-to-gpt-routing-enabled is true.
 	EnableClaudeModels *bool `yaml:"enable-claude-models,omitempty" json:"enable-claude-models,omitempty"`
 
+	// ClaudeGPTTargetFamily optionally overrides the GPT family used by the synthesized
+	// Claude -> GPT routing/failover defaults for this API key. Supported values:
+	// "gpt-5.2" and "gpt-5.4". When unset, the server defaults to gpt-5.4.
+	ClaudeGPTTargetFamily string `yaml:"claude-gpt-target-family,omitempty" json:"claude-gpt-target-family,omitempty"`
+
 	// EnableClaudeOpus1M allows this API key to keep Claude Opus 1M capability even when
 	// the global disable-claude-opus-1m switch is enabled.
 	EnableClaudeOpus1M *bool `yaml:"enable-claude-opus-1m,omitempty" json:"enable-claude-opus-1m,omitempty"`
@@ -130,30 +135,34 @@ type APIKeyFailoverPolicy struct {
 	Claude ProviderFailoverPolicy `yaml:"claude,omitempty" json:"claude,omitempty"`
 }
 
-func defaultGlobalClaudeRoutingRules() []ModelRoutingRule {
+func defaultGlobalClaudeRoutingRules(family string) []ModelRoutingRule {
 	enabled := true
+	opusTarget, _ := policy.DefaultClaudeGPTTargetForFamily("claude-opus-default", family)
+	defaultTarget, _ := policy.DefaultClaudeGPTTargetForFamily("claude-default", family)
 	return []ModelRoutingRule{
 		{
 			Enabled:             &enabled,
 			FromModel:           "claude-opus-*",
-			TargetModel:         "gpt-5.4(high)",
+			TargetModel:         opusTarget,
 			TargetPercent:       100,
 			StickyWindowSeconds: 3600,
 		},
 		{
 			Enabled:             &enabled,
 			FromModel:           "claude-*",
-			TargetModel:         "gpt-5.4(medium)",
+			TargetModel:         defaultTarget,
 			TargetPercent:       100,
 			StickyWindowSeconds: 3600,
 		},
 	}
 }
 
-func defaultGlobalClaudeFailoverRules() []ModelFailoverRule {
+func defaultGlobalClaudeFailoverRules(family string) []ModelFailoverRule {
+	opusTarget, _ := policy.DefaultClaudeGPTTargetForFamily("claude-opus-default", family)
+	defaultTarget, _ := policy.DefaultClaudeGPTTargetForFamily("claude-default", family)
 	return []ModelFailoverRule{
-		{FromModel: "claude-opus-*", TargetModel: "gpt-5.4(high)"},
-		{FromModel: "claude-*", TargetModel: "gpt-5.4(medium)"},
+		{FromModel: "claude-opus-*", TargetModel: opusTarget},
+		{FromModel: "claude-*", TargetModel: defaultTarget},
 	}
 }
 
@@ -271,6 +280,13 @@ func (p *APIKeyPolicy) ClaudeModelsEnabled() bool {
 	return *p.EnableClaudeModels
 }
 
+func (p *APIKeyPolicy) ClaudeGPTTargetFamilyOrDefault() string {
+	if p == nil {
+		return policy.EffectiveClaudeGPTTargetFamily("")
+	}
+	return policy.EffectiveClaudeGPTTargetFamily(p.ClaudeGPTTargetFamily)
+}
+
 func (p *APIKeyPolicy) ClaudeOpus1MEnabled() bool {
 	if p == nil || p.EnableClaudeOpus1M == nil {
 		return false
@@ -310,7 +326,7 @@ func (p *APIKeyPolicy) ClaudeFailoverTargetModel() (string, bool) {
 	}
 	target := strings.TrimSpace(p.Failover.Claude.TargetModel)
 	if target == "" {
-		target = "gpt-5.4(medium)"
+		target, _ = policy.DefaultClaudeGPTTargetForFamily("claude-default", p.ClaudeGPTTargetFamilyOrDefault())
 	}
 	return target, true
 }
@@ -411,14 +427,14 @@ func (cfg *Config) EffectiveAPIKeyPolicy(apiKey string) *APIKeyPolicy {
 		if found := cfg.FindAPIKeyPolicy(key); found != nil {
 			if cfg.ClaudeToGPTRoutingEnabled && entry.ClaudeModelsEnabled() && !hasExplicitClaudeFailoverConfig(entry.Failover.Claude) {
 				entry.Failover.Claude.Enabled = true
-				entry.Failover.Claude.Rules = append([]ModelFailoverRule(nil), defaultGlobalClaudeFailoverRules()...)
+				entry.Failover.Claude.Rules = append([]ModelFailoverRule(nil), defaultGlobalClaudeFailoverRules(entry.ClaudeGPTTargetFamilyOrDefault())...)
 			}
 			return &entry
 		}
 		return nil
 	}
 
-	entry.ModelRouting.Rules = append(defaultGlobalClaudeRoutingRules(), entry.ModelRouting.Rules...)
+	entry.ModelRouting.Rules = append(defaultGlobalClaudeRoutingRules(entry.ClaudeGPTTargetFamilyOrDefault()), entry.ModelRouting.Rules...)
 
 	return &entry
 }
@@ -443,6 +459,7 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		}
 
 		entry.UpstreamBaseURL = strings.TrimSpace(entry.UpstreamBaseURL)
+		entry.ClaudeGPTTargetFamily = policy.NormalizeClaudeGPTTargetFamily(entry.ClaudeGPTTargetFamily)
 
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 

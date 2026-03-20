@@ -163,6 +163,30 @@ func TestPatchAPIKeyPolicies_EnableClaudeModels(t *testing.T) {
 	}
 }
 
+func TestPatchAPIKeyPolicies_ClaudeGPTTargetFamily(t *testing.T) {
+	h, configPath := newAPIKeyPoliciesHandler(t)
+	r := setupAPIKeyPoliciesRouter(h)
+
+	body := `{"api-key":"k1","value":{"claude-gpt-target-family":"gpt-5.2"}}`
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/api-key-policies", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	policy := loaded.FindAPIKeyPolicy("k1")
+	if policy == nil || policy.ClaudeGPTTargetFamily != "gpt-5.2" {
+		t.Fatalf("claude-gpt-target-family not persisted: %+v", policy)
+	}
+}
+
 func TestPatchAPIKeyPolicies_DisableClaudeFailoverRemovesEnabledFlagFromFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

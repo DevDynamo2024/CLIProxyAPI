@@ -65,19 +65,20 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 		Claude *providerFailoverPatch `json:"claude"`
 	}
 	type policyPatch struct {
-		FastMode             *bool              `json:"fast-mode"`
-		EnableClaudeModels   *bool              `json:"enable-claude-models"`
-		EnableClaudeOpus1M   *bool              `json:"enable-claude-opus-1m"`
-		ModelRouting         *modelRoutingPatch `json:"model-routing"`
-		UpstreamBaseURL      *string            `json:"upstream-base-url"`
-		ExcludedModels       *[]string          `json:"excluded-models"`
-		AllowClaudeOpus46    *bool              `json:"allow-claude-opus-4-6"`
-		DailyLimits          *map[string]int    `json:"daily-limits"`
-		DailyBudgetUSD       *float64           `json:"daily-budget-usd"`
-		WeeklyBudgetUSD      *float64           `json:"weekly-budget-usd"`
-		WeeklyBudgetAnchorAt *string            `json:"weekly-budget-anchor-at"`
-		Failover             *failoverPatch     `json:"failover"`
-		APIKey               *string            `json:"api-key"`
+		FastMode              *bool              `json:"fast-mode"`
+		EnableClaudeModels    *bool              `json:"enable-claude-models"`
+		ClaudeGPTTargetFamily *string            `json:"claude-gpt-target-family"`
+		EnableClaudeOpus1M    *bool              `json:"enable-claude-opus-1m"`
+		ModelRouting          *modelRoutingPatch `json:"model-routing"`
+		UpstreamBaseURL       *string            `json:"upstream-base-url"`
+		ExcludedModels        *[]string          `json:"excluded-models"`
+		AllowClaudeOpus46     *bool              `json:"allow-claude-opus-4-6"`
+		DailyLimits           *map[string]int    `json:"daily-limits"`
+		DailyBudgetUSD        *float64           `json:"daily-budget-usd"`
+		WeeklyBudgetUSD       *float64           `json:"weekly-budget-usd"`
+		WeeklyBudgetAnchorAt  *string            `json:"weekly-budget-anchor-at"`
+		Failover              *failoverPatch     `json:"failover"`
+		APIKey                *string            `json:"api-key"`
 	}
 	var body struct {
 		APIKey string       `json:"api-key"`
@@ -125,6 +126,9 @@ func (h *Handler) PatchAPIKeyPolicies(c *gin.Context) {
 	if body.Value.EnableClaudeModels != nil {
 		v := *body.Value.EnableClaudeModels
 		entry.EnableClaudeModels = &v
+	}
+	if body.Value.ClaudeGPTTargetFamily != nil {
+		entry.ClaudeGPTTargetFamily = strings.TrimSpace(*body.Value.ClaudeGPTTargetFamily)
 	}
 	if body.Value.FastMode != nil {
 		entry.FastMode = *body.Value.FastMode

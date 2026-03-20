@@ -157,6 +157,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						if contentResult.IsArray() {
 							toolResultContentIndex := 0
 							toolResultContent := `[]`
+							hasUnsupportedStructuredPart := false
 							contentResults := contentResult.Array()
 							for k := 0; k < len(contentResults); k++ {
 								toolResultContentType := contentResults[k].Get("type").String()
@@ -186,9 +187,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex), "input_text")
 									toolResultContent, _ = sjson.Set(toolResultContent, fmt.Sprintf("%d.text", toolResultContentIndex), contentResults[k].Get("text").String())
 									toolResultContentIndex++
+								} else {
+									// Preserve non-text/image structured tool outputs (for example tool_reference
+									// items from Claude web_search) by falling back to the original JSON string
+									// instead of silently dropping them.
+									hasUnsupportedStructuredPart = true
 								}
 							}
-							if toolResultContent != `[]` {
+							if hasUnsupportedStructuredPart {
+								functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", contentResult.Raw)
+							} else if toolResultContent != `[]` {
 								functionCallOutputMessage, _ = sjson.SetRaw(functionCallOutputMessage, "output", toolResultContent)
 							} else {
 								functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
