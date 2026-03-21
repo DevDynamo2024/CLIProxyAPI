@@ -13,6 +13,11 @@ type SDKConfig struct {
 	// to route to GPT targets unless the API key policy explicitly enables Claude models.
 	ClaudeToGPTRoutingEnabled bool `yaml:"claude-to-gpt-routing-enabled" json:"claude-to-gpt-routing-enabled"`
 
+	// ClaudeToGPTTargetFamily selects the default GPT family used by the global
+	// Claude -> GPT routing/failover defaults. Supported values: "gpt-5.2", "gpt-5.4".
+	// When unset, the server defaults to gpt-5.4.
+	ClaudeToGPTTargetFamily string `yaml:"claude-to-gpt-target-family,omitempty" json:"claude-to-gpt-target-family,omitempty"`
+
 	// DisableClaudeOpus1M strips Claude Opus 1M capability from client API key requests by default.
 	// When true, the proxy removes the custom 1M header and beta flag unless the API key policy
 	// explicitly enables Opus 1M for that key.

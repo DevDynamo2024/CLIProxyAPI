@@ -393,6 +393,13 @@ func (cfg *Config) ShouldRouteClaudeToGPT(apiKey string) bool {
 	return !entry.ClaudeModelsEnabled()
 }
 
+func (cfg *Config) ClaudeGPTTargetFamilyOrDefault() string {
+	if cfg == nil {
+		return policy.EffectiveClaudeGPTTargetFamily("")
+	}
+	return policy.EffectiveClaudeGPTTargetFamily(cfg.ClaudeToGPTTargetFamily)
+}
+
 // AllowsClaudeOpus1M reports whether this client API key may keep Claude Opus 1M capability.
 // When the global switch is off, all keys are allowed. When the global switch is on, only
 // keys with enable-claude-opus-1m=true are allowed.
@@ -421,6 +428,9 @@ func (cfg *Config) EffectiveAPIKeyPolicy(apiKey string) *APIKeyPolicy {
 	entry := APIKeyPolicy{APIKey: key}
 	if found := cfg.FindAPIKeyPolicy(key); found != nil {
 		entry = *found
+	}
+	if strings.TrimSpace(entry.ClaudeGPTTargetFamily) == "" {
+		entry.ClaudeGPTTargetFamily = cfg.ClaudeGPTTargetFamilyOrDefault()
 	}
 
 	if !cfg.ShouldRouteClaudeToGPT(key) {

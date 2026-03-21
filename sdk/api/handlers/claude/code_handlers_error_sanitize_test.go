@@ -10,11 +10,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	basehandlers "github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 const rawUsageLimitError = `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","plan_type":"team","resets_in_seconds":11773}}`
@@ -511,5 +514,63 @@ func TestClaudeMessages_SuppressesOrganizationDisabledStreaming(t *testing.T) {
 	}
 	if !strings.Contains(body, "upstream model temporarily unavailable, please retry later") {
 		t.Fatalf("expected generic retry message, got %s", body)
+	}
+}
+
+func TestSanitizeClientError_LogsRawUpstreamErrorInErrorField(t *testing.T) {
+	logger, hook := logtest.NewNullLogger()
+	prevHooks := log.StandardLogger().Hooks
+	prevOut := log.StandardLogger().Out
+	prevFormatter := log.StandardLogger().Formatter
+	prevLevel := log.StandardLogger().Level
+	log.SetOutput(logger.Out)
+	log.StandardLogger().ReplaceHooks(logger.Hooks)
+	log.SetFormatter(logger.Formatter)
+	log.SetLevel(logger.Level)
+	t.Cleanup(func() {
+		log.SetOutput(prevOut)
+		log.StandardLogger().ReplaceHooks(prevHooks)
+		log.SetFormatter(prevFormatter)
+		log.SetLevel(prevLevel)
+	})
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set("cpa_failover_provider", "codex")
+
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error: &coreauth.Error{
+			Code:       "upstream_error",
+			Message:    rawServiceUnavailableError,
+			Retryable:  false,
+			HTTPStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	sanitized := handler.sanitizeClientError(c, msg)
+	if sanitized == nil || sanitized.Error == nil {
+		t.Fatal("expected sanitized error")
+	}
+	if sanitized.Error.Error() != "upstream model temporarily unavailable, please retry later" {
+		t.Fatalf("unexpected sanitized error: %v", sanitized.Error)
+	}
+
+	entries := hook.AllEntries()
+	if len(entries) == 0 {
+		t.Fatal("expected sanitizeClientError to emit a log entry")
+	}
+	last := entries[len(entries)-1]
+	errField, ok := last.Data["error"].(error)
+	if !ok || errField == nil {
+		t.Fatalf("expected error field in log entry, got %#v", last.Data["error"])
+	}
+	if !strings.Contains(errField.Error(), rawServiceUnavailableError) {
+		t.Fatalf("expected raw upstream error in log field, got %v", errField)
+	}
+	if got := last.Data["provider"]; got != "codex" {
+		t.Fatalf("expected provider=codex, got %#v", got)
 	}
 }

@@ -37,6 +37,8 @@ func setupAPIKeyPoliciesRouter(h *management.Handler) *gin.Engine {
 	{
 		mgmt.GET("/api-key-policies", h.GetAPIKeyPolicies)
 		mgmt.PATCH("/api-key-policies", h.PatchAPIKeyPolicies)
+		mgmt.GET("/claude-to-gpt-target-family", h.GetClaudeToGPTTargetFamily)
+		mgmt.PATCH("/claude-to-gpt-target-family", h.PutClaudeToGPTTargetFamily)
 	}
 	return r
 }
@@ -184,6 +186,45 @@ func TestPatchAPIKeyPolicies_ClaudeGPTTargetFamily(t *testing.T) {
 	policy := loaded.FindAPIKeyPolicy("k1")
 	if policy == nil || policy.ClaudeGPTTargetFamily != "gpt-5.2" {
 		t.Fatalf("claude-gpt-target-family not persisted: %+v", policy)
+	}
+}
+
+func TestPatchGlobalClaudeToGPTTargetFamily(t *testing.T) {
+	h, configPath := newAPIKeyPoliciesHandler(t)
+	r := setupAPIKeyPoliciesRouter(h)
+
+	body := `{"value":"gpt-5.2"}`
+	req := httptest.NewRequest(http.MethodPatch, "/v0/management/claude-to-gpt-target-family", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	loaded, err := config.LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.ClaudeToGPTTargetFamily != "gpt-5.2" {
+		t.Fatalf("claude-to-gpt-target-family=%q", loaded.ClaudeToGPTTargetFamily)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/claude-to-gpt-target-family", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("get status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["claude-to-gpt-target-family"] != "gpt-5.2" {
+		t.Fatalf("response=%v", resp)
 	}
 }
 

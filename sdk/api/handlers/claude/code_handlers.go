@@ -313,15 +313,17 @@ func (h *ClaudeCodeAPIHandler) sanitizeClientError(c *gin.Context, msg *interfac
 		return msg
 	}
 
-	raw := ""
-	if msg != nil && msg.Error != nil {
-		raw = strings.TrimSpace(msg.Error.Error())
+	entry := log.WithFields(log.Fields{
+		"component":   "claude_error_sanitize",
+		"status_code": msg.StatusCode,
+	})
+	if hasCodexFailoverMarker(c) {
+		entry = entry.WithField("provider", "codex")
 	}
-	log.WithFields(log.Fields{
-		"component":      "claude_error_sanitize",
-		"status_code":    msg.StatusCode,
-		"upstream_error": raw,
-	}).Error("suppressing raw upstream error for Claude client")
+	if msg != nil && msg.Error != nil {
+		entry = entry.WithError(msg.Error)
+	}
+	entry.Error("suppressing raw upstream error for Claude client")
 
 	sanitized := *msg
 	sanitized.StatusCode = http.StatusServiceUnavailable
