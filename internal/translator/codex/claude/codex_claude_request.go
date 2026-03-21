@@ -233,6 +233,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		shortMap := buildShortNameMap(names)
 		for i := 0; i < len(toolResults); i++ {
 			toolResult := toolResults[i]
+			// Keep Claude built-in web search as a Codex built-in tool so Claude -> GPT
+			// failover preserves native search semantics instead of degrading to a function.
+			if toolResult.Get("type").String() == "web_search_20250305" {
+				template, _ = sjson.SetRaw(template, "tools.-1", `{"type":"web_search"}`)
+				continue
+			}
 			tool := toolResult.Raw
 			tool, _ = sjson.Set(tool, "type", "function")
 			// Apply shortened name if needed

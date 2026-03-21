@@ -48,7 +48,7 @@ func TestConvertClaudeRequestToCodex_PreservesStructuredToolResultContent(t *tes
 	}
 }
 
-func TestConvertClaudeRequestToCodex_WebSearchToolUsesFunctionSemantics(t *testing.T) {
+func TestConvertClaudeRequestToCodex_WebSearchToolUsesBuiltinSemantics(t *testing.T) {
 	input := []byte(`{
 		"model": "claude-sonnet-4-6",
 		"tools": [
@@ -70,29 +70,20 @@ func TestConvertClaudeRequestToCodex_WebSearchToolUsesFunctionSemantics(t *testi
 
 	out := ConvertClaudeRequestToCodex("gpt-5.4", input, false)
 
-	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "function" {
-		t.Fatalf("tools.0.type = %q, want %q; raw=%s", got, "function", string(out))
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search" {
+		t.Fatalf("tools.0.type = %q, want %q; raw=%s", got, "web_search", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
-		t.Fatalf("tools.0.name = %q, want %q; raw=%s", got, "web_search", string(out))
+	if gjson.GetBytes(out, "tools.0.name").Exists() {
+		t.Fatalf("tools.0.name should not exist for builtin web_search; raw=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.description").String(); got != "Search the web for recent news" {
-		t.Fatalf("tools.0.description = %q, want %q; raw=%s", got, "Search the web for recent news", string(out))
+	if gjson.GetBytes(out, "tools.0.description").Exists() {
+		t.Fatalf("tools.0.description should not exist for builtin web_search; raw=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.parameters.type").String(); got != "object" {
-		t.Fatalf("tools.0.parameters.type = %q, want %q; raw=%s", got, "object", string(out))
+	if gjson.GetBytes(out, "tools.0.parameters").Exists() {
+		t.Fatalf("tools.0.parameters should not exist for builtin web_search; raw=%s", string(out))
 	}
-	if got := gjson.GetBytes(out, "tools.0.parameters.properties.query.type").String(); got != "string" {
-		t.Fatalf("tools.0.parameters.properties.query.type = %q, want %q; raw=%s", got, "string", string(out))
-	}
-	if got := gjson.GetBytes(out, "tools.0.required.0").String(); got != "" {
-		t.Fatalf("tools.0.required should not exist at top level; raw=%s", string(out))
-	}
-	if got := gjson.GetBytes(out, "tools.0.parameters.required.0").String(); got != "query" {
-		t.Fatalf("tools.0.parameters.required.0 = %q, want %q; raw=%s", got, "query", string(out))
-	}
-	if got := gjson.GetBytes(out, "tools.0.input_schema").Exists(); got {
-		t.Fatalf("tools.0.input_schema should be removed; raw=%s", string(out))
+	if got := gjson.GetBytes(out, "tool_choice").String(); got != "auto" {
+		t.Fatalf("tool_choice = %q, want %q; raw=%s", got, "auto", string(out))
 	}
 }
 
