@@ -37,6 +37,10 @@ type hostedWebSearchCall struct {
 	URL       string
 }
 
+func (call hostedWebSearchCall) IsSearchRequest() bool {
+	return isHostedWebSearchSearchAction(call.Action)
+}
+
 type hostedWebSearchResult struct {
 	URL       string
 	Title     string
@@ -129,6 +133,9 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 	} else if typeStr == "response.completed" {
 		searchResults := collectHostedWebSearchResults(rootResult.Get("response.output"))
 		for _, call := range (*param).(*ConvertCodexResponseToClaudeParams).WebSearchCalls {
+			if !call.IsSearchRequest() {
+				continue
+			}
 			webSearchBlock := `{"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`
 			webSearchBlock, _ = sjson.Set(webSearchBlock, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
 			webSearchBlock, _ = sjson.Set(webSearchBlock, "content_block.tool_use_id", call.ToolUseID)
@@ -211,28 +218,32 @@ func ConvertCodexResponseToClaude(_ context.Context, _ string, originalRequestRa
 		} else if itemType == "web_search_call" {
 			call, ok := parseHostedWebSearchCall(itemResult)
 			if ok {
-				(*param).(*ConvertCodexResponseToClaudeParams).WebSearchCalls = append((*param).(*ConvertCodexResponseToClaudeParams).WebSearchCalls, call)
+				if call.IsSearchRequest() {
+					(*param).(*ConvertCodexResponseToClaudeParams).WebSearchCalls = append((*param).(*ConvertCodexResponseToClaudeParams).WebSearchCalls, call)
+				}
 
-				template = `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`
-				template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-				template, _ = sjson.Set(template, "content_block.id", call.ToolUseID)
+				if call.IsSearchRequest() {
+					template = `{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`
+					template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+					template, _ = sjson.Set(template, "content_block.id", call.ToolUseID)
 
-				output = "event: content_block_start\n"
-				output += fmt.Sprintf("data: %s\n\n", template)
+					output = "event: content_block_start\n"
+					output += fmt.Sprintf("data: %s\n\n", template)
 
-				template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
-				template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-				template, _ = sjson.Set(template, "delta.partial_json", buildHostedWebSearchInputJSON(call))
+					template = `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`
+					template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+					template, _ = sjson.Set(template, "delta.partial_json", buildHostedWebSearchInputJSON(call))
 
-				output += "event: content_block_delta\n"
-				output += fmt.Sprintf("data: %s\n\n", template)
+					output += "event: content_block_delta\n"
+					output += fmt.Sprintf("data: %s\n\n", template)
 
-				template = `{"type":"content_block_stop","index":0}`
-				template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
-				(*param).(*ConvertCodexResponseToClaudeParams).BlockIndex++
+					template = `{"type":"content_block_stop","index":0}`
+					template, _ = sjson.Set(template, "index", (*param).(*ConvertCodexResponseToClaudeParams).BlockIndex)
+					(*param).(*ConvertCodexResponseToClaudeParams).BlockIndex++
 
-				output += "event: content_block_stop\n"
-				output += fmt.Sprintf("data: %s\n\n", template)
+					output += "event: content_block_stop\n"
+					output += fmt.Sprintf("data: %s\n\n", template)
+				}
 			}
 		}
 	} else if typeStr == "response.function_call_arguments.delta" {
@@ -391,6 +402,9 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 				if !ok {
 					return true
 				}
+				if !call.IsSearchRequest() {
+					return true
+				}
 				webSearchCalls = append(webSearchCalls, call)
 
 				serverToolBlock := `{"type":"server_tool_use","id":"","name":"web_search","input":{}}`
@@ -506,6 +520,10 @@ func parseHostedWebSearchCall(item gjson.Result) (hostedWebSearchCall, bool) {
 		return hostedWebSearchCall{}, false
 	}
 	return call, true
+}
+
+func isHostedWebSearchSearchAction(action string) bool {
+	return action == "" || action == "search"
 }
 
 func hostedWebSearchToolUseID(itemID string) string {
