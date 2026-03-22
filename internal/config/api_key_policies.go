@@ -21,9 +21,9 @@ type APIKeyPolicy struct {
 	// It only takes effect when claude-to-gpt-routing-enabled is true.
 	EnableClaudeModels *bool `yaml:"enable-claude-models,omitempty" json:"enable-claude-models,omitempty"`
 
-	// ClaudeGPTTargetFamily optionally overrides the GPT family used by the synthesized
+	// ClaudeGPTTargetFamily optionally overrides the target base model used by the synthesized
 	// Claude -> GPT routing/failover defaults for this API key. Supported values:
-	// "gpt-5.2" and "gpt-5.4". When unset, the server defaults to gpt-5.4.
+	// "gpt-5.2", "gpt-5.4", and "gpt-5.3-codex". When unset, the server defaults to gpt-5.4.
 	ClaudeGPTTargetFamily string `yaml:"claude-gpt-target-family,omitempty" json:"claude-gpt-target-family,omitempty"`
 
 	// EnableClaudeOpus1M allows this API key to keep Claude Opus 1M capability even when
@@ -282,9 +282,9 @@ func (p *APIKeyPolicy) ClaudeModelsEnabled() bool {
 
 func (p *APIKeyPolicy) ClaudeGPTTargetFamilyOrDefault() string {
 	if p == nil {
-		return policy.EffectiveClaudeGPTTargetFamily("")
+		return policy.EffectiveClaudeGPTTargetBase("")
 	}
-	return policy.EffectiveClaudeGPTTargetFamily(p.ClaudeGPTTargetFamily)
+	return policy.EffectiveClaudeGPTTargetBase(p.ClaudeGPTTargetFamily)
 }
 
 func (p *APIKeyPolicy) ClaudeOpus1MEnabled() bool {
@@ -469,7 +469,7 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 		}
 
 		entry.UpstreamBaseURL = strings.TrimSpace(entry.UpstreamBaseURL)
-		entry.ClaudeGPTTargetFamily = policy.NormalizeClaudeGPTTargetFamily(entry.ClaudeGPTTargetFamily)
+		entry.ClaudeGPTTargetFamily = policy.NormalizeClaudeGPTTargetBase(entry.ClaudeGPTTargetFamily)
 
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 

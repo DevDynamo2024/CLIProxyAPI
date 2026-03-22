@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	claudeModelPrefix            = "claude-"
-	claudeOpusPrefix             = "claude-opus-"
-	claudeOpus46Prefix           = "claude-opus-4-6"
-	claudeOpus45FallbackPrefix   = "claude-opus-4-5-20251101"
-	claudeThinkingSuffixLiteral  = "-thinking"
-	ClaudeGPTTargetFamilyGPT52   = "gpt-5.2"
-	ClaudeGPTTargetFamilyGPT54   = "gpt-5.4"
-	defaultClaudeGPTHighTarget   = "gpt-5.4(high)"
-	defaultClaudeGPTMediumTarget = "gpt-5.4(medium)"
+	claudeModelPrefix              = "claude-"
+	claudeOpusPrefix               = "claude-opus-"
+	claudeOpus46Prefix             = "claude-opus-4-6"
+	claudeOpus45FallbackPrefix     = "claude-opus-4-5-20251101"
+	claudeThinkingSuffixLiteral    = "-thinking"
+	ClaudeGPTTargetFamilyGPT52     = "gpt-5.2"
+	ClaudeGPTTargetFamilyGPT54     = "gpt-5.4"
+	ClaudeGPTTargetModelGPT53Codex = "gpt-5.3-codex"
+	defaultClaudeGPTHighTarget     = "gpt-5.4(high)"
+	defaultClaudeGPTMediumTarget   = "gpt-5.4(medium)"
 )
 
 // NormaliseModelKey returns a lowercased model name without thinking budget suffix "(...)".
@@ -80,6 +81,21 @@ func NormalizeClaudeGPTTargetFamily(value string) string {
 	}
 }
 
+// NormalizeClaudeGPTTargetBase returns a canonical target base model for per-key
+// Claude -> GPT routing overrides. Unsupported values are normalized to "".
+func NormalizeClaudeGPTTargetBase(value string) string {
+	switch NormaliseModelKey(value) {
+	case ClaudeGPTTargetFamilyGPT52:
+		return ClaudeGPTTargetFamilyGPT52
+	case ClaudeGPTTargetFamilyGPT54:
+		return ClaudeGPTTargetFamilyGPT54
+	case ClaudeGPTTargetModelGPT53Codex:
+		return ClaudeGPTTargetModelGPT53Codex
+	default:
+		return ""
+	}
+}
+
 // EffectiveClaudeGPTTargetFamily resolves the configured Claude -> GPT family,
 // defaulting to gpt-5.4 when unset or invalid.
 func EffectiveClaudeGPTTargetFamily(value string) string {
@@ -89,14 +105,23 @@ func EffectiveClaudeGPTTargetFamily(value string) string {
 	return ClaudeGPTTargetFamilyGPT54
 }
 
+// EffectiveClaudeGPTTargetBase resolves the configured per-key Claude -> GPT target base model,
+// defaulting to gpt-5.4 when unset or invalid.
+func EffectiveClaudeGPTTargetBase(value string) string {
+	if base := NormalizeClaudeGPTTargetBase(value); base != "" {
+		return base
+	}
+	return ClaudeGPTTargetFamilyGPT54
+}
+
 // DefaultClaudeGPTTargetForFamily maps Claude requests to the default GPT target
-// used by the global Claude -> GPT routing feature for the selected GPT family.
+// used by Claude -> GPT routing for the selected target base model.
 func DefaultClaudeGPTTargetForFamily(model, family string) (string, bool) {
 	key := NormaliseModelKey(model)
 	if !strings.HasPrefix(key, claudeModelPrefix) {
 		return "", false
 	}
-	family = EffectiveClaudeGPTTargetFamily(family)
+	family = EffectiveClaudeGPTTargetBase(family)
 	if strings.HasPrefix(key, claudeOpusPrefix) {
 		return family + "(high)", true
 	}
