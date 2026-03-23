@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+func TestConvertCodexResponseToClaude_SanitizesToolUseID(t *testing.T) {
+	var param any
+	originalReq := []byte(`{"tools":[{"name":"web_search"}]}`)
+
+	out := ConvertCodexResponseToClaude(
+		context.Background(),
+		"gpt-5.4",
+		originalReq,
+		nil,
+		[]byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call:123/with bad chars","name":"web_search"}}`),
+		&param,
+	)
+
+	joined := strings.Join(out, "")
+	if !strings.Contains(joined, `"id":"call_123_with_bad_chars"`) {
+		t.Fatalf("expected sanitized tool_use id, got %q", joined)
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_SanitizesToolUseID(t *testing.T) {
+	originalReq := []byte(`{"tools":[{"name":"web_search"}]}`)
+	raw := []byte(`{"type":"response.completed","response":{"id":"resp_123","model":"gpt-5.4","output":[{"type":"function_call","call_id":"call:123/with bad chars","name":"web_search","arguments":"{}"}]}}`)
+
+	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-5.4", originalReq, nil, raw, nil)
+
+	if !strings.Contains(out, `"id":"call_123_with_bad_chars"`) {
+		t.Fatalf("expected sanitized tool_use id, got %q", out)
+	}
+}
+
 func TestConvertCodexResponseToClaude_EmitsArgumentsFromDoneWhenDeltaMissing(t *testing.T) {
 	var param any
 	originalReq := []byte(`{"tools":[{"name":"web_search"}]}`)

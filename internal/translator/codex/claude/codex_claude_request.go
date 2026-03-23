@@ -43,18 +43,35 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
-	if systemsResult.IsArray() {
-		systemResults := systemsResult.Array()
+	if systemsResult.Exists() {
 		message := `{"type":"message","role":"developer","content":[]}`
-		for i := 0; i < len(systemResults); i++ {
-			systemResult := systemResults[i]
-			systemTypeResult := systemResult.Get("type")
-			if systemTypeResult.String() == "text" {
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", i), "input_text")
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", i), systemResult.Get("text").String())
+		contentIndex := 0
+
+		appendSystemText := func(text string) {
+			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+				return
+			}
+
+			message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
+			message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", contentIndex), text)
+			contentIndex++
+		}
+
+		if systemsResult.Type == gjson.String {
+			appendSystemText(systemsResult.String())
+		} else if systemsResult.IsArray() {
+			systemResults := systemsResult.Array()
+			for i := 0; i < len(systemResults); i++ {
+				systemResult := systemResults[i]
+				if systemResult.Get("type").String() == "text" {
+					appendSystemText(systemResult.Get("text").String())
+				}
 			}
 		}
-		template, _ = sjson.SetRaw(template, "input.-1", message)
+
+		if contentIndex > 0 {
+			template, _ = sjson.SetRaw(template, "input.-1", message)
+		}
 	}
 
 	// Process messages and transform their contents to appropriate formats.
@@ -254,6 +271,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
+			tool, _ = sjson.Delete(tool, "cache_control")
+			tool, _ = sjson.Delete(tool, "defer_loading")
 			tool, _ = sjson.Set(tool, "strict", false)
 			template, _ = sjson.SetRaw(template, "tools.-1", tool)
 		}
@@ -273,10 +292,18 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					reasoningEffort = effort
 				}
 			}
-		case "adaptive":
-			// Claude adaptive means "enable with max capacity"; keep it as highest level
-			// and let ApplyThinking normalize per target model capability.
-			reasoningEffort = string(thinking.LevelXHigh)
+		case "adaptive", "auto":
+			// Claude adaptive thinking may carry an explicit output_config.effort.
+			// Preserve it so downstream Codex thinking normalization can clamp it per model.
+			effort := ""
+			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+				effort = strings.ToLower(strings.TrimSpace(v.String()))
+			}
+			if effort != "" {
+				reasoningEffort = effort
+			} else {
+				reasoningEffort = string(thinking.LevelXHigh)
+			}
 		case "disabled":
 			if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
 				reasoningEffort = effort
@@ -286,6 +313,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.Set(template, "reasoning.effort", reasoningEffort)
 	template, _ = sjson.Set(template, "reasoning.summary", "auto")
 	template, _ = sjson.Set(template, "stream", true)
+	template, _ = sjson.Set(template, "store", false)
 	template, _ = sjson.Set(template, "include", []string{"reasoning.encrypted_content"})
 
 	return []byte(template)
